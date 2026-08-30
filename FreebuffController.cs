@@ -1700,7 +1700,7 @@ namespace FreebuffController
             public ProxySettingsDialog()
             {
                 Text = "代理设置";
-                ClientSize = new Size(460, 224);
+                ClientSize = new Size(460, 232);
                 BackColor = ColPanel;
                 ForeColor = ColText;
                 Font = new Font("Microsoft YaHei UI", 9.75f);
@@ -1711,34 +1711,35 @@ namespace FreebuffController
                 StartPosition = FormStartPosition.CenterParent;
 
                 var q = new Label();
+                q.AutoSize = false;
                 q.Text = "网络路径：本地代理 → 系统代理 → 直连。从本工具启动的 Freebuff 实例在代理运行时也会走它。";
-                q.Bounds = new Rectangle(16, 10, 428, 30);
+                q.Bounds = new Rectangle(16, 10, 428, 36);
                 q.ForeColor = ColSub;
                 Controls.Add(q);
 
                 var urlLabel = new Label();
                 urlLabel.AutoSize = false;
                 urlLabel.Text = "本地代理地址（留空 = 自动探测常见端口；off = 停用）";
-                urlLabel.Bounds = new Rectangle(16, 44, 428, 18);
+                urlLabel.Bounds = new Rectangle(16, 52, 428, 18);
                 Controls.Add(urlLabel);
 
-                urlBox.Bounds = new Rectangle(16, 64, 428, 23);
+                urlBox.Bounds = new Rectangle(16, 72, 428, 23);
                 urlBox.Text = CurrentSettingText();
                 Controls.Add(urlBox);
 
                 stateLabel.AutoSize = false;
-                stateLabel.Bounds = new Rectangle(16, 94, 428, 30);
+                stateLabel.Bounds = new Rectangle(16, 94, 428, 36);
                 Controls.Add(stateLabel);
 
                 portProbeLabel.AutoSize = false;
-                portProbeLabel.Bounds = new Rectangle(16, 128, 428, 18);
+                portProbeLabel.Bounds = new Rectangle(16, 142, 428, 18);
                 portProbeLabel.ForeColor = ColSub;
                 Controls.Add(portProbeLabel);
 
                 var note = new Label();
                 note.AutoSize = false;
                 note.Text = "保存后立即生效：控制器网络请求与之后启动的实例都使用新值。";
-                note.Bounds = new Rectangle(16, 150, 428, 18);
+                note.Bounds = new Rectangle(16, 164, 428, 18);
                 note.ForeColor = ColSub;
                 Controls.Add(note);
 
@@ -1845,7 +1846,7 @@ namespace FreebuffController
             {
                 var b = new Button();
                 b.Text = text;
-                b.Bounds = new Rectangle(x, 158, 100, 32);
+                b.Bounds = new Rectangle(x, 184, 100, 32);
                 b.FlatStyle = FlatStyle.Flat;
                 b.FlatAppearance.BorderSize = 0;
                 b.FlatAppearance.MouseOverBackColor = hover;
