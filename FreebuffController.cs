@@ -20,6 +20,9 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
+[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.0.0.0")]
+
 namespace FreebuffController
 {
     internal static class Program
@@ -208,7 +211,7 @@ namespace FreebuffController
 
         private void BuildUi()
         {
-            Text = "Freebuff 多开控制器";
+            Text = "Freebuff 多开控制器 v" + System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
             ClientSize = new Size(580, 546);
             BackColor = ColBg;
             ForeColor = ColText;

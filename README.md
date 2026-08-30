@@ -65,6 +65,8 @@ compatible with `apply.sh`'s backup mechanism).
 
 ## 编译 / Build
 
+> 不想编译？直接从 [Releases](https://github.com/Ximmmmmmm/freebuff-controller/releases) 下载单文件 exe 即可。发新版：改 `FreebuffController.cs` 里的 `AssemblyVersion` 后跑 `bash release.sh`（编译 + 打 tag + 上传）。
+
 不需要安装任何 SDK，Windows 自带的 .NET Framework C# 编译器即可：
 
 ```
