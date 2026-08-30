@@ -320,12 +320,14 @@ namespace FreebuffController
                 RefreshInstalledVersion(); // app may have updated meanwhile
                 CheckVersionAsync();
                 CheckPackUpdateAsync();
+                DetectProxyAsync();
                 RefreshHanhuaUi();
             };
             versionTimer.Start();
 
             ComputeAndApply();
             FetchQuotasAsync(true);
+            DetectProxyAsync();
             CheckVersionAsync();
             CheckPackUpdateAsync();
         }
@@ -472,6 +474,7 @@ namespace FreebuffController
         // 对控制器自身的网络请求与之后启动的实例立即生效。
         private void OpenProxySettings()
         {
+            DetectProxyAsync();
             bool changed;
             using (var dlg = new ProxySettingsDialog())
             {
@@ -479,7 +482,10 @@ namespace FreebuffController
                 changed = dlg.Changed;
             }
             if (changed)
+            {
                 SetStatus("代理设置已保存并立即生效 ✓");
+                DetectProxyAsync();
+            }
         }
 
         private static void RoundControl(Control c, int radius)
@@ -632,43 +638,56 @@ namespace FreebuffController
 
         // Network attempts, most preferred first. Many machines reach GitHub
         // only through a local proxy client that is NOT the system proxy (a
-        // loopback port), so it is probed before the system default — a dead
-        // loopback port is refused instantly, so the extra attempt is free,
-        // while a live one is the only route through. null = system default,
-        // "" = force direct. proxy.txt overrides the loopback address or
-        // ("off") disables it.
+        // loopback port). The local candidate comes from proxy.txt ("manual")
+        // or from probing common loopback ports ("auto", the no-config
+        // default); a dead loopback port is refused instantly, so extra
+        // attempts are free. null = system default, "" = force direct.
+
         private const string DefaultLocalProxyUrl = "http://127.0.0.1:10808";
+        // Common loopback ports of local proxy clients (Clash 7890 / Verge
+        // 7897 / v2rayN 10808+10809 / SS 1080), probed in this order.
+        private static readonly int[] AutoDetectPorts = new int[] { 7890, 7897, 10808, 10809, 1080 };
+        private const string Probe204Url = "http://connect.rom.miui.com/generate_204";
 
         private static readonly string LocalProxyConfigFile = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "FreebuffController\\proxy.txt");
-        // The local proxy URL, or null when disabled ("off") / misconfigured.
-        // Mutable + reloadable: the settings dialog rewrites proxy.txt and
-        // calls ReloadProxyConfig so changes take effect immediately.
-        private static string LocalProxyUrl = BuildLocalProxyUrl();
-        private static string[] ProxyCandidates = BuildProxyCandidates();
+        // Config modes: "manual" (proxy.txt holds a URL), "off", or "auto"
+        // (no config file — probe AutoDetectPorts). DetectedProxyUrl caches
+        // that probe; stickyRoute remembers the route that answered last and
+        // is retried first. All mutable: the settings dialog rewrites
+        // proxy.txt and calls ReloadProxyConfig.
+        private static string localProxyMode = "auto";
+        private static string manualProxyUrl;
+        private static string detectedProxyUrl;
+        private static string stickyRoute;
+        private static string lastRouteText = "";
+        private static int detectBusy;
 
         private static void ReloadProxyConfig()
         {
-            LocalProxyUrl = BuildLocalProxyUrl();
-            ProxyCandidates = BuildProxyCandidates();
-        }
-
-        private static string BuildLocalProxyUrl()
-        {
+            string mode = "auto", url = null;
             try
             {
                 if (File.Exists(LocalProxyConfigFile))
                 {
                     string t = File.ReadAllText(LocalProxyConfigFile).Trim();
-                    if (t.Length > 0 && !t.Equals("off", StringComparison.OrdinalIgnoreCase))
-                        return t;
-                    return null;
+                    if (t.Length > 0)
+                    {
+                        if (t.Equals("off", StringComparison.OrdinalIgnoreCase))
+                            mode = "off";
+                        else
+                        {
+                            Uri u;
+                            if (Uri.TryCreate(t, UriKind.Absolute, out u)) { mode = "manual"; url = t; }
+                        }
+                    }
                 }
-                // Common loopback entry of local proxy clients.
-                return DefaultLocalProxyUrl;
             }
-            catch { return null; }
+            catch { }
+            localProxyMode = mode;
+            manualProxyUrl = url;
+            stickyRoute = null;
         }
 
         private static void WriteProxyConfig(string content)
@@ -677,21 +696,95 @@ namespace FreebuffController
             File.WriteAllText(LocalProxyConfigFile, content);
         }
 
-        private static string[] BuildProxyCandidates()
+        private static bool IsSocksUrl(string url)
         {
-            var list = new List<string>();
-            Uri u;
-            if (LocalProxyUrl != null && Uri.TryCreate(LocalProxyUrl, UriKind.Absolute, out u))
-                list.Add(LocalProxyUrl);
+            return url != null && url.StartsWith("socks", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Route candidates for the controller's own requests, most preferred
+        // first: manual URL → auto-detected local proxy → system proxy (null)
+        // → direct (""). socks5:// entries are excluded here (HttpWebRequest
+        // cannot speak SOCKS) but still handed to launched instances.
+        private static string[] OrderedCandidates()
+        {
+            var list = new List<string>(3);
+            if (localProxyMode == "manual" && manualProxyUrl != null && !IsSocksUrl(manualProxyUrl))
+                list.Add(manualProxyUrl);
+            else if (localProxyMode == "auto" && detectedProxyUrl != null && !IsSocksUrl(detectedProxyUrl))
+                list.Add(detectedProxyUrl);
             list.Add(null); // system default proxy
             list.Add("");   // explicit direct
+
+            if (stickyRoute != null)
+            {
+                var ordered = new List<string>(list.Count);
+                foreach (string c in list) if (c == stickyRoute) { ordered.Add(c); break; }
+                foreach (string c in list) if (c != stickyRoute) ordered.Add(c);
+                return ordered.ToArray();
+            }
             return list.ToArray();
+        }
+
+        private static void NoteRouteSuccess(string candidate)
+        {
+            stickyRoute = candidate;
+            lastRouteText = (candidate == null) ? "系统代理"
+                          : (candidate.Length == 0 ? "直连" : candidate);
+        }
+
+        private static string RouteText()
+        {
+            return (lastRouteText.Length > 0) ? " · 走 " + lastRouteText : "";
         }
 
         private static void ApplyProxy(HttpWebRequest req, string candidate)
         {
             if (candidate == null) return; // leave the system default in place
             req.Proxy = (candidate.Length == 0) ? null : new WebProxy(candidate);
+        }
+
+        // 功能级探测：经该代理请求 204 端点。端口开着但不是 HTTP 代理（如
+        // SOCKS-only）会被排除；死端口瞬间失败，活端口一次往返。
+        private static bool ProxyFunctional(string url)
+        {
+            try
+            {
+                var u = new Uri(url);
+                var req = (HttpWebRequest)WebRequest.Create(Probe204Url);
+                req.Proxy = new WebProxy(u.Host, u.Port);
+                req.Method = "GET";
+                req.Timeout = 2500;
+                req.ReadWriteTimeout = 2500;
+                req.AllowAutoRedirect = false;
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                {
+                    int code = (int)resp.StatusCode;
+                    return code == 204 || code == 200;
+                }
+            }
+            catch { return false; }
+        }
+
+        // 后台探测常见端口；结果缓存到 detectedProxyUrl，auto 模式下进入候选链。
+        private static void DetectProxyAsync()
+        {
+            if (localProxyMode != "auto") return;
+            if (Interlocked.CompareExchange(ref detectBusy, 1, 0) != 0) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string found = null;
+                try
+                {
+                    foreach (int port in AutoDetectPorts)
+                    {
+                        string candidate = "http://127.0.0.1:" + port;
+                        if (ProxyFunctional(candidate)) { found = candidate; break; }
+                    }
+                }
+                catch { }
+                detectedProxyUrl = found;
+                Interlocked.Exchange(ref detectBusy, 0);
+            });
         }
 
         // True when the local proxy is actually listening. Loopback connects
@@ -720,7 +813,9 @@ namespace FreebuffController
         // exactly as before; the app falls back to the system proxy itself.
         private static string LaunchProxyUrl()
         {
-            string url = LocalProxyUrl;
+            string url = (localProxyMode == "manual") ? manualProxyUrl
+                       : (localProxyMode == "auto") ? detectedProxyUrl
+                       : null;
             if (url == null || !ProxyAlive(url)) return null;
             return url;
         }
@@ -772,7 +867,7 @@ namespace FreebuffController
                         if (!IsDisposed)
                         {
                             ApplyQuotaColumn();
-                            if (force) SetStatus("额度已刷新 ✓");
+                            if (force) SetStatus("额度已刷新 ✓" + RouteText());
                         }
                     });
                 }
@@ -828,11 +923,11 @@ namespace FreebuffController
 
         // GET the session endpoint and summarize the premium-pool quota.
         // Shows the tightest remaining allowance across models. Routes are
-        // tried in ProxyCandidates order; only a route-level failure moves
+        // tried in OrderedCandidates() order; only a route-level failure moves
         // on to the next one.
         private static string FetchQuota(string token)
         {
-            foreach (string candidate in ProxyCandidates)
+            foreach (string candidate in OrderedCandidates())
             {
                 string result = TryFetchQuota(token, candidate);
                 if (result != null) return result;
@@ -856,6 +951,7 @@ namespace FreebuffController
                 using (var resp = (HttpWebResponse)req.GetResponse())
                 using (var sr = new System.IO.StreamReader(resp.GetResponseStream()))
                 {
+                    NoteRouteSuccess(proxyCandidate);
                     var body = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(sr.ReadToEnd());
                     if (body == null || !body.ContainsKey("rateLimitsByModel")) return "—";
                     var models = body["rateLimitsByModel"] as Dictionary<string, object>;
@@ -938,10 +1034,10 @@ namespace FreebuffController
         // already carries the latest version, so we read just that header
         // instead of following to GitHub, which can be slow or unreachable.
         // A feed that ever serves the file directly still works via the
-        // body fallback below. Routes are tried in ProxyCandidates order.
+        // body fallback below. Routes are tried in OrderedCandidates() order.
         private static string FetchLatestVersion(string feedUrl)
         {
-            foreach (string candidate in ProxyCandidates)
+            foreach (string candidate in OrderedCandidates())
             {
                 try
                 {
@@ -955,6 +1051,7 @@ namespace FreebuffController
                     ApplyProxy(req, candidate);
                     using (var resp = (HttpWebResponse)req.GetResponse())
                     {
+                        NoteRouteSuccess(candidate);
                         int code = (int)resp.StatusCode;
                         if (code >= 300 && code < 400)
                         {
@@ -1211,12 +1308,12 @@ namespace FreebuffController
 
         // GET a URL and return the body, following redirects (the installer
         // feed hops to GitHub, and so do the pack release assets). Routes
-        // are tried in ProxyCandidates order — machines with a half-working
+        // are tried in OrderedCandidates() order — machines with a half-working
         // system proxy often fail exactly on the GitHub hop, and machines
         // without a system proxy need the loopback one first.
         private static string FetchUrlBody(string url)
         {
-            foreach (string candidate in ProxyCandidates)
+            foreach (string candidate in OrderedCandidates())
             {
                 try
                 {
@@ -1231,7 +1328,9 @@ namespace FreebuffController
                     using (var resp = (HttpWebResponse)req.GetResponse())
                     using (var sr = new StreamReader(resp.GetResponseStream()))
                     {
-                        return sr.ReadToEnd();
+                        string body = sr.ReadToEnd();
+                        NoteRouteSuccess(candidate);
+                        return body;
                     }
                 }
                 catch { }
@@ -1247,7 +1346,7 @@ namespace FreebuffController
                 : feed;
         }
 
-        // Tries every candidate URL over every route in ProxyCandidates
+        // Tries every candidate URL over every route in OrderedCandidates()
         // order (local proxy, system proxy, direct): whichever path the
         // machine needs for GitHub, one of them gets through.
         private static void DownloadFirstAvailable(IList<string> urls, string dest,
@@ -1256,7 +1355,7 @@ namespace FreebuffController
             Exception last = null;
             foreach (string url in urls)
             {
-                foreach (string candidate in ProxyCandidates)
+                foreach (string candidate in OrderedCandidates())
                 {
                     try
                     {
@@ -1280,7 +1379,9 @@ namespace FreebuffController
             req.ReadWriteTimeout = 30000;
             req.UserAgent = "FreebuffMultiOpenController/1.0";
             ApplyProxy(req, proxyCandidate);
-            using (var resp = (HttpWebResponse)req.GetResponse())
+            var resp = (HttpWebResponse)req.GetResponse();
+            NoteRouteSuccess(proxyCandidate);
+            using (resp)
             using (var rs = resp.GetResponseStream())
             using (var fs = new FileStream(dest, FileMode.Create, FileAccess.Write))
             {
@@ -1584,13 +1685,14 @@ namespace FreebuffController
         {
             private readonly TextBox urlBox = new TextBox();
             private readonly Label stateLabel = new Label();
+            private readonly Label portProbeLabel = new Label();
 
             public bool Changed { get; private set; }
 
             public ProxySettingsDialog()
             {
                 Text = "代理设置";
-                ClientSize = new Size(460, 204);
+                ClientSize = new Size(460, 224);
                 BackColor = ColPanel;
                 ForeColor = ColText;
                 Font = new Font("Microsoft YaHei UI", 9.75f);
@@ -1607,20 +1709,24 @@ namespace FreebuffController
                 Controls.Add(q);
 
                 var urlLabel = new Label();
-                urlLabel.Text = "本地代理地址（off = 停用；清空后保存 = 恢复默认）";
+                urlLabel.Text = "本地代理地址（留空 = 自动探测常见端口；off = 停用）";
                 urlLabel.Bounds = new Rectangle(16, 44, 428, 18);
                 Controls.Add(urlLabel);
 
                 urlBox.Bounds = new Rectangle(16, 64, 428, 23);
-                urlBox.Text = LocalProxyUrl ?? "off";
+                urlBox.Text = CurrentSettingText();
                 Controls.Add(urlBox);
 
                 stateLabel.Bounds = new Rectangle(16, 94, 428, 30);
                 Controls.Add(stateLabel);
 
+                portProbeLabel.Bounds = new Rectangle(16, 128, 428, 18);
+                portProbeLabel.ForeColor = ColSub;
+                Controls.Add(portProbeLabel);
+
                 var note = new Label();
                 note.Text = "保存后立即生效：控制器网络请求与之后启动的实例都使用新值。";
-                note.Bounds = new Rectangle(16, 128, 428, 18);
+                note.Bounds = new Rectangle(16, 150, 428, 18);
                 note.ForeColor = ColSub;
                 Controls.Add(note);
 
@@ -1640,8 +1746,16 @@ namespace FreebuffController
                 ScaleUi(this, DpiScale());
             }
 
-            // value: null = 恢复默认（删除配置文件），"off" = 停用，
-            // 其他 = 代理地址（须为绝对 URL）。空串视同恢复默认。
+            // 输入框显示值：off / 手工地址；auto 模式留空（保存空 = 恢复自动）。
+            private static string CurrentSettingText()
+            {
+                if (localProxyMode == "off") return "off";
+                if (localProxyMode == "manual") return manualProxyUrl;
+                return "";
+            }
+
+            // value: null/空 = 恢复默认（删配置文件回自动探测），"off" = 停用，
+            // 其他 = 代理地址（须为绝对 URL）。
             private void ApplySetting(string value)
             {
                 if (string.IsNullOrEmpty(value))
@@ -1665,24 +1779,54 @@ namespace FreebuffController
                 }
                 ReloadProxyConfig();
                 Changed = true;
-                urlBox.Text = LocalProxyUrl ?? "off";
+                urlBox.Text = CurrentSettingText();
+                if (localProxyMode == "auto") DetectProxyAsync();
                 UpdateState();
             }
 
             private void UpdateState()
             {
-                string url = LocalProxyUrl;
+                if (localProxyMode == "off")
+                {
+                    stateLabel.Text = "✗ 已停用（off）：网络走 系统代理 → 直连，启动的实例不注入代理。";
+                    stateLabel.ForeColor = ColSub;
+                    RefreshPortProbe(false);
+                    return;
+                }
+                string url = (localProxyMode == "manual") ? manualProxyUrl : detectedProxyUrl;
                 if (url == null)
                 {
-                    stateLabel.Text = "✗ 已停用：控制器网络走 系统代理 → 直连，启动的实例不注入代理。";
+                    stateLabel.Text = "… 自动探测中：常见端口（7890 / 7897 / 10808 / 10809 / 1080）尚无可用 HTTP 代理。";
                     stateLabel.ForeColor = ColSub;
+                    RefreshPortProbe(true);
                     return;
                 }
                 bool alive = ProxyAlive(url);
+                string socks = IsSocksUrl(url) ? "（SOCKS：仅启动的实例使用，控制器自身请求跳过）" : "";
                 stateLabel.Text = alive
-                    ? "✓ 本地代理运行中（" + url + "）：控制器网络与启动的实例都会使用它。"
-                    : "✗ 本地代理未运行（" + url + "）：请求自动落到 系统代理 → 直连，启动实例不带代理参数。";
+                    ? "✓ 本地代理运行中（" + url + "）" + socks + "：控制器网络与启动的实例都会使用它。"
+                    : "✗ 未在运行（" + url + "）：请求自动落到 系统代理 → 直连，启动实例不带代理参数。";
                 stateLabel.ForeColor = alive ? ColGreen : ColSub;
+                RefreshPortProbe(true);
+            }
+
+            // 后台逐端口探测：TCP 可达 + 功能级探测（经代理请求 204 端点）。
+            private void RefreshPortProbe(bool functional)
+            {
+                portProbeLabel.Text = "端口探测中…";
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    var sb = new System.Text.StringBuilder("端口探测：");
+                    for (int i = 0; i < AutoDetectPorts.Length; i++)
+                    {
+                        string u = "http://127.0.0.1:" + AutoDetectPorts[i];
+                        bool ok = ProxyAlive(u) && (!functional || ProxyFunctional(u));
+                        sb.Append(AutoDetectPorts[i]).Append(ok ? " ✓" : " ✗");
+                        if (i < AutoDetectPorts.Length - 1) sb.Append(" · ");
+                    }
+                    string text = sb.ToString();
+                    try { BeginInvoke((MethodInvoker)delegate { portProbeLabel.Text = text; }); } catch { }
+                });
             }
 
             private Button MakeButton(string text, int x, Color back, Color hover)
