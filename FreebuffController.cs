@@ -222,9 +222,18 @@ namespace FreebuffController
 
             var hint = new Label();
             hint.Text = "管理多开的 Freebuff 实例 · 每个实例可以用不同账号登录 · 双击行直接启动";
-            hint.Bounds = new Rectangle(22, 14, 540, 20);
+            hint.Bounds = new Rectangle(22, 14, 450, 20);
             hint.ForeColor = ColSub;
             Controls.Add(hint);
+
+            var proxyLink = new Label();
+            proxyLink.Text = "代理设置";
+            proxyLink.Bounds = new Rectangle(486, 14, 74, 20);
+            proxyLink.TextAlign = ContentAlignment.MiddleRight;
+            proxyLink.ForeColor = ColAccent;
+            proxyLink.Cursor = Cursors.Hand;
+            proxyLink.Click += delegate { OpenProxySettings(); };
+            Controls.Add(proxyLink);
 
             BuildGrid();
 
@@ -456,6 +465,20 @@ namespace FreebuffController
             Activate();
         }
 
+        // 代理设置入口：对话框内保存即写入 proxy.txt 并 ReloadProxyConfig，
+        // 对控制器自身的网络请求与之后启动的实例立即生效。
+        private void OpenProxySettings()
+        {
+            bool changed;
+            using (var dlg = new ProxySettingsDialog())
+            {
+                dlg.ShowDialog(this);
+                changed = dlg.Changed;
+            }
+            if (changed)
+                SetStatus("代理设置已保存并立即生效 ✓");
+        }
+
         private static void RoundControl(Control c, int radius)
         {
             var path = new GraphicsPath();
@@ -611,12 +634,22 @@ namespace FreebuffController
         // while a live one is the only route through. null = system default,
         // "" = force direct. proxy.txt overrides the loopback address or
         // ("off") disables it.
+        private const string DefaultLocalProxyUrl = "http://127.0.0.1:10808";
+
         private static readonly string LocalProxyConfigFile = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "FreebuffController\\proxy.txt");
         // The local proxy URL, or null when disabled ("off") / misconfigured.
-        private static readonly string LocalProxyUrl = BuildLocalProxyUrl();
-        private static readonly string[] ProxyCandidates = BuildProxyCandidates();
+        // Mutable + reloadable: the settings dialog rewrites proxy.txt and
+        // calls ReloadProxyConfig so changes take effect immediately.
+        private static string LocalProxyUrl = BuildLocalProxyUrl();
+        private static string[] ProxyCandidates = BuildProxyCandidates();
+
+        private static void ReloadProxyConfig()
+        {
+            LocalProxyUrl = BuildLocalProxyUrl();
+            ProxyCandidates = BuildProxyCandidates();
+        }
 
         private static string BuildLocalProxyUrl()
         {
@@ -630,9 +663,15 @@ namespace FreebuffController
                     return null;
                 }
                 // Common loopback entry of local proxy clients.
-                return "http://127.0.0.1:10808";
+                return DefaultLocalProxyUrl;
             }
             catch { return null; }
+        }
+
+        private static void WriteProxyConfig(string content)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LocalProxyConfigFile));
+            File.WriteAllText(LocalProxyConfigFile, content);
         }
 
         private static string[] BuildProxyCandidates()
@@ -1536,6 +1575,142 @@ namespace FreebuffController
             }
         }
 
+        // 代理设置对话框：查看/修改/停用本地代理（落地为 proxy.txt，与手工
+        // 编辑等价），保存后立即生效；状态行实时探测端口可达性。
+        private class ProxySettingsDialog : Form
+        {
+            private readonly TextBox urlBox = new TextBox();
+            private readonly Label stateLabel = new Label();
+
+            public bool Changed { get; private set; }
+
+            public ProxySettingsDialog()
+            {
+                Text = "代理设置";
+                ClientSize = new Size(460, 204);
+                BackColor = ColPanel;
+                ForeColor = ColText;
+                Font = new Font("Microsoft YaHei UI", 9.75f);
+                FormBorderStyle = FormBorderStyle.FixedDialog;
+                MinimizeBox = false;
+                MaximizeBox = false;
+                ShowInTaskbar = false;
+                StartPosition = FormStartPosition.CenterParent;
+
+                var q = new Label();
+                q.Text = "网络路径：本地代理 → 系统代理 → 直连。从本工具启动的 Freebuff 实例在代理运行时也会走它。";
+                q.Bounds = new Rectangle(16, 10, 428, 30);
+                q.ForeColor = ColSub;
+                Controls.Add(q);
+
+                var urlLabel = new Label();
+                urlLabel.Text = "本地代理地址（off = 停用；清空后保存 = 恢复默认）";
+                urlLabel.Bounds = new Rectangle(16, 44, 428, 18);
+                Controls.Add(urlLabel);
+
+                urlBox.Bounds = new Rectangle(16, 64, 428, 23);
+                urlBox.Text = LocalProxyUrl ?? "off";
+                Controls.Add(urlBox);
+
+                stateLabel.Bounds = new Rectangle(16, 94, 428, 30);
+                Controls.Add(stateLabel);
+
+                var note = new Label();
+                note.Text = "保存后立即生效：控制器网络请求与之后启动的实例都使用新值。";
+                note.Bounds = new Rectangle(16, 128, 428, 18);
+                note.ForeColor = ColSub;
+                Controls.Add(note);
+
+                Button reset = MakeButton("恢复默认", 16, ColNeutral, ColNeutralHover);
+                reset.Click += delegate { ApplySetting(null); };
+                Button off = MakeButton("停用", 126, ColNeutral, ColNeutralHover);
+                off.Click += delegate { ApplySetting("off"); };
+                Button save = MakeButton("保存", 236, ColAccent, ColAccentHover);
+                save.Click += delegate { ApplySetting(urlBox.Text.Trim()); };
+                Button cancel = MakeButton("取消", 346, ColNeutral, ColNeutralHover);
+                cancel.DialogResult = DialogResult.Cancel;
+                CancelButton = cancel;
+
+                UpdateState();
+
+                // Same 96-DPI-authored layout as the main window.
+                ScaleUi(this, DpiScale());
+            }
+
+            // value: null = 恢复默认（删除配置文件），"off" = 停用，
+            // 其他 = 代理地址（须为绝对 URL）。空串视同恢复默认。
+            private void ApplySetting(string value)
+            {
+                if (string.IsNullOrEmpty(value))
+                {
+                    try { File.Delete(LocalProxyConfigFile); } catch { }
+                }
+                else if (value.Equals("off", StringComparison.OrdinalIgnoreCase))
+                {
+                    WriteProxyConfig("off");
+                }
+                else
+                {
+                    Uri u;
+                    if (!Uri.TryCreate(value, UriKind.Absolute, out u))
+                    {
+                        MessageBox.Show(this, "不是有效的地址，例如 " + DefaultLocalProxyUrl,
+                            "代理设置", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    WriteProxyConfig(value);
+                }
+                ReloadProxyConfig();
+                Changed = true;
+                urlBox.Text = LocalProxyUrl ?? "off";
+                UpdateState();
+            }
+
+            private void UpdateState()
+            {
+                string url = LocalProxyUrl;
+                if (url == null)
+                {
+                    stateLabel.Text = "✗ 已停用：控制器网络走 系统代理 → 直连，启动的实例不注入代理。";
+                    stateLabel.ForeColor = ColSub;
+                    return;
+                }
+                bool alive = ProxyAlive(url);
+                stateLabel.Text = alive
+                    ? "✓ 本地代理运行中（" + url + "）：控制器网络与启动的实例都会使用它。"
+                    : "✗ 本地代理未运行（" + url + "）：请求自动落到 系统代理 → 直连，启动实例不带代理参数。";
+                stateLabel.ForeColor = alive ? ColGreen : ColSub;
+            }
+
+            private Button MakeButton(string text, int x, Color back, Color hover)
+            {
+                var b = new Button();
+                b.Text = text;
+                b.Bounds = new Rectangle(x, 158, 100, 32);
+                b.FlatStyle = FlatStyle.Flat;
+                b.FlatAppearance.BorderSize = 0;
+                b.FlatAppearance.MouseOverBackColor = hover;
+                b.FlatAppearance.MouseDownBackColor = hover;
+                b.BackColor = back;
+                b.ForeColor = Color.White;
+                b.Cursor = Cursors.Hand;
+                RoundControl(b, 10);
+                Controls.Add(b);
+                return b;
+            }
+
+            protected override void OnHandleCreated(EventArgs e)
+            {
+                base.OnHandleCreated(e);
+                try
+                {
+                    int on = 1; // DWMWA_USE_IMMERSIVE_DARK_MODE
+                    DwmSetWindowAttribute(Handle, 20, ref on, 4);
+                }
+                catch { }
+            }
+        }
+
         // After a launch, confirm on a background thread that the process is
         // still alive, so "nothing happened" always comes with an explanation.
         private void VerifyLaunched(int rowIndex, string what)
@@ -1923,6 +2098,15 @@ namespace FreebuffController
             string outUi = Path.Combine(output, "ui");
             if (Directory.Exists(outUi)) Directory.Delete(outUi, true);
             CopyDir(stagedUi, outUi);
+
+            // The staged copy is the source of truth now — the temp zip and
+            // unpack dir have served their purpose.
+            try
+            {
+                File.Delete(dest);
+                Directory.Delete(extractDir, true);
+            }
+            catch { }
             return packVersion;
         }
 
