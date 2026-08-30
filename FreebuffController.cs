@@ -224,12 +224,14 @@ namespace FreebuffController
             Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
 
             var hint = new Label();
+            hint.AutoSize = false;
             hint.Text = "管理多开的 Freebuff 实例 · 每个实例可以用不同账号登录 · 双击行直接启动";
             hint.Bounds = new Rectangle(22, 14, 450, 20);
             hint.ForeColor = ColSub;
             Controls.Add(hint);
 
             var proxyLink = new Label();
+            proxyLink.AutoSize = false;
             proxyLink.Text = "代理设置";
             proxyLink.Bounds = new Rectangle(486, 14, 74, 20);
             proxyLink.TextAlign = ContentAlignment.MiddleRight;
@@ -256,6 +258,7 @@ namespace FreebuffController
             btnRefresh.Click += delegate { SetStatus("正在刷新…"); RefreshGrid(); FetchQuotasAsync(true); };
 
             hanhuaLabel = new Label();
+            hanhuaLabel.AutoSize = false;
             hanhuaLabel.Bounds = new Rectangle(22, 494, 324, 16);
             hanhuaLabel.ForeColor = ColSub;
             hanhuaLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
@@ -270,6 +273,7 @@ namespace FreebuffController
             BuildTray();
 
             statusLabel = new Label();
+            statusLabel.AutoSize = false;
             statusLabel.Text = ReadyStatus();
             statusLabel.Bounds = new Rectangle(22, 524, 330, 16);
             statusLabel.ForeColor = ColSub;
@@ -277,6 +281,7 @@ namespace FreebuffController
             Controls.Add(statusLabel);
 
             versionLink = new Label();
+            versionLink.AutoSize = false;
             versionLink.Text = string.IsNullOrEmpty(installedVersion)
                 ? "Freebuff 版本未知 · 检查更新"
                 : "Freebuff v" + installedVersion + " · 检查更新";
@@ -1559,6 +1564,7 @@ namespace FreebuffController
                 StartPosition = FormStartPosition.CenterParent;
 
                 var q = new Label();
+                q.AutoSize = false;
                 q.Text = "实例 " + slot + " 还没有登录过，这次要如何启动？";
                 q.Bounds = new Rectangle(16, 14, 394, 20);
                 Controls.Add(q);
@@ -1571,6 +1577,7 @@ namespace FreebuffController
                 Controls.Add(rbFresh);
 
                 var subFresh = new Label();
+                subFresh.AutoSize = false;
                 subFresh.Text = "打开后在窗口里登录该实例要用的账号，每个窗口可用不同账号";
                 subFresh.Bounds = new Rectangle(38, 70, 372, 18);
                 subFresh.ForeColor = ColSub;
@@ -1606,6 +1613,7 @@ namespace FreebuffController
                 Controls.Add(source);
 
                 var subCopy = new Label();
+                subCopy.AutoSize = false;
                 subCopy.Text = "把来源实例的登录状态原样克隆到实例 " + slot +
                     "，打开后无需再登录。\r\n注意：同一账号多开会共享每日额度。";
                 subCopy.Bounds = new Rectangle(38, 154, 372, 34);
@@ -1709,6 +1717,7 @@ namespace FreebuffController
                 Controls.Add(q);
 
                 var urlLabel = new Label();
+                urlLabel.AutoSize = false;
                 urlLabel.Text = "本地代理地址（留空 = 自动探测常见端口；off = 停用）";
                 urlLabel.Bounds = new Rectangle(16, 44, 428, 18);
                 Controls.Add(urlLabel);
@@ -1717,14 +1726,17 @@ namespace FreebuffController
                 urlBox.Text = CurrentSettingText();
                 Controls.Add(urlBox);
 
+                stateLabel.AutoSize = false;
                 stateLabel.Bounds = new Rectangle(16, 94, 428, 30);
                 Controls.Add(stateLabel);
 
+                portProbeLabel.AutoSize = false;
                 portProbeLabel.Bounds = new Rectangle(16, 128, 428, 18);
                 portProbeLabel.ForeColor = ColSub;
                 Controls.Add(portProbeLabel);
 
                 var note = new Label();
+                note.AutoSize = false;
                 note.Text = "保存后立即生效：控制器网络请求与之后启动的实例都使用新值。";
                 note.Bounds = new Rectangle(16, 150, 428, 18);
                 note.ForeColor = ColSub;
