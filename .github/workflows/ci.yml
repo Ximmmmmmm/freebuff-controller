@@ -1,0 +1,18 @@
+# 控制器编译冒烟：系统自带 csc（C# 5）+ 全部引用，防止语法/引用回归。
+name: build
+
+on:
+  push:
+    paths: ['FreebuffController.cs', 'build.bat', '.github/workflows/**']
+  pull_request:
+    paths: ['FreebuffController.cs', 'build.bat', '.github/workflows/**']
+  workflow_dispatch:
+
+jobs:
+  controller-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 编译冒烟（build.bat，失败退出码会传播）
+        shell: cmd
+        run: call build.bat
