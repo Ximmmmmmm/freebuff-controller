@@ -124,6 +124,7 @@ namespace FreebuffController
         private System.Windows.Forms.Timer refreshTimer;
         private System.Windows.Forms.Timer quotaTimer;
         private System.Windows.Forms.Timer versionTimer;
+        private System.Windows.Forms.Timer proxyTimer;
         private int refreshBusy;
         private int quotaBusy;
         private DateTime lastQuotaFetch = DateTime.MinValue;
@@ -202,6 +203,7 @@ namespace FreebuffController
             if (refreshTimer != null) refreshTimer.Dispose();
             if (quotaTimer != null) quotaTimer.Dispose();
             if (versionTimer != null) versionTimer.Dispose();
+            if (proxyTimer != null) proxyTimer.Dispose();
             tray.Visible = false;
             tray.Dispose();
             base.OnFormClosed(e);
@@ -329,6 +331,13 @@ namespace FreebuffController
                 RefreshHanhuaUi();
             };
             versionTimer.Start();
+
+            // 每 60 秒重探一次本地代理，保证 detectedProxyUrl 常新：
+            // 代理客户端晚启动 / 换端口 / 出口恢复都能被自动追上。
+            proxyTimer = new System.Windows.Forms.Timer();
+            proxyTimer.Interval = 60000;
+            proxyTimer.Tick += delegate { DetectProxyAsync(); };
+            proxyTimer.Start();
 
             ComputeAndApply();
             FetchQuotasAsync(true);
@@ -653,6 +662,9 @@ namespace FreebuffController
         // 7897 / v2rayN 10808+10809 / SS 1080), probed in this order.
         private static readonly int[] AutoDetectPorts = new int[] { 7890, 7897, 10808, 10809, 1080 };
         private const string Probe204Url = "http://connect.rom.miui.com/generate_204";
+        // 出墙确认端点：必须经代理能访问到境外服务才算"可用"，
+        // 否则端口是活的但只会转发直连（不翻墙）时会被误判。
+        private const string ProbeForeignUrl = "https://www.gstatic.com/generate_204";
 
         private static readonly string LocalProxyConfigFile = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -748,14 +760,20 @@ namespace FreebuffController
             req.Proxy = (candidate.Length == 0) ? null : new WebProxy(candidate);
         }
 
-        // 功能级探测：经该代理请求 204 端点。端口开着但不是 HTTP 代理（如
-        // SOCKS-only）会被排除；死端口瞬间失败，活端口一次往返。
+        // 功能级探测：经该代理先后请求国内 204（确认端口是 HTTP 代理，
+        // 排除 SOCKS-only / 死端口）与境外 204（确认代理真能出墙，排除
+        // 只转发直连的本地端口）。两跳都过才算可用。
         private static bool ProxyFunctional(string url)
+        {
+            return ProxyProbeOk(url, Probe204Url) && ProxyProbeOk(url, ProbeForeignUrl);
+        }
+
+        private static bool ProxyProbeOk(string proxyUrl, string targetUrl)
         {
             try
             {
-                var u = new Uri(url);
-                var req = (HttpWebRequest)WebRequest.Create(Probe204Url);
+                var u = new Uri(proxyUrl);
+                var req = (HttpWebRequest)WebRequest.Create(targetUrl);
                 req.Proxy = new WebProxy(u.Host, u.Port);
                 req.Method = "GET";
                 req.Timeout = 2500;
@@ -778,18 +796,47 @@ namespace FreebuffController
             ThreadPool.QueueUserWorkItem(delegate
             {
                 string found = null;
-                try
-                {
-                    foreach (int port in AutoDetectPorts)
-                    {
-                        string candidate = "http://127.0.0.1:" + port;
-                        if (ProxyFunctional(candidate)) { found = candidate; break; }
-                    }
-                }
+                try { found = ProbeLocalProxy(); }
                 catch { }
                 detectedProxyUrl = found;
                 Interlocked.Exchange(ref detectBusy, 0);
             });
+        }
+
+        // 逐个端口探测：先 TCP 预过滤（死端口瞬时跳过，不耗 HTTP 超时），
+        // 只对活端口做功能级探测。
+        private static string ProbeLocalProxy()
+        {
+            foreach (int port in AutoDetectPorts)
+            {
+                string candidate = "http://127.0.0.1:" + port;
+                if (!ProxyAlive(candidate)) continue;
+                if (ProxyFunctional(candidate)) return candidate;
+            }
+            return null;
+        }
+
+        // 启动实例前的兜底：缓存缺失/失效时现场探测。后台若已有探测在跑
+        // （detectBusy 竞争），等它最多 2 秒出结果，避免重复 HTTP 探测；
+        // 超时则返回 null（实例回落系统代理，60s 定时器稍后补探）。
+        private static string ProbeLocalProxyNow()
+        {
+            if (Interlocked.CompareExchange(ref detectBusy, 1, 0) == 0)
+            {
+                string found = null;
+                try { found = ProbeLocalProxy(); }
+                catch { }
+                detectedProxyUrl = found;
+                Interlocked.Exchange(ref detectBusy, 0);
+                return found;
+            }
+            int waited = 0;
+            while (detectBusy != 0 && waited < 2000)
+            {
+                System.Threading.Thread.Sleep(100);
+                waited += 100;
+            }
+            return detectedProxyUrl;
         }
 
         // True when the local proxy is actually listening. Loopback connects
@@ -813,16 +860,31 @@ namespace FreebuffController
 
         // The proxy handed to launched Freebuff instances: the same local
         // proxy the controller's own requests prefer — but only when it is
-        // actually listening, because with --proxy-server set a dead proxy
+        // actually working, because with --proxy-server set a dead proxy
         // would leave the instance without any working route. null = launch
         // exactly as before; the app falls back to the system proxy itself.
+        // auto 模式下缓存缺失/失效会当场重探一轮，避免"打开时没代理"。
         private static string LaunchProxyUrl()
         {
             string url = (localProxyMode == "manual") ? manualProxyUrl
                        : (localProxyMode == "auto") ? detectedProxyUrl
                        : null;
-            if (url == null || !ProxyAlive(url)) return null;
-            return url;
+            if (url != null && !ProxyAlive(url)) url = null; // 缓存失效
+            if (url != null)
+            {
+                // manual 模式：端口活着但可能僵死（TCP 通、请求不通），
+                // 非 SOCKS 再补一次 HTTP 确认，宁可不加也不塞死代理。
+                if (localProxyMode == "manual" && !IsSocksUrl(url)
+                    && !ProxyFunctional(url))
+                    return null;
+                return url;
+            }
+            if (localProxyMode == "auto")
+            {
+                string found = ProbeLocalProxyNow();
+                if (found != null && ProxyAlive(found)) return found;
+            }
+            return null;
         }
 
         // --proxy-server covers the Chromium side (UI, electron-updater);
