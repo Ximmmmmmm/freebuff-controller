@@ -3,9 +3,11 @@ name: build
 
 on:
   push:
-    paths: ['FreebuffController.cs', 'build.bat', '.github/workflows/**']
+    paths: ['FreebuffController.cs', 'LangPref.cs', 'LangPrefTest.cs',
+            'build.bat', 'test_langpref.bat', '.github/workflows/**']
   pull_request:
-    paths: ['FreebuffController.cs', 'build.bat', '.github/workflows/**']
+    paths: ['FreebuffController.cs', 'LangPref.cs', 'LangPrefTest.cs',
+            'build.bat', 'test_langpref.bat', '.github/workflows/**']
   workflow_dispatch:
 
 jobs:
@@ -16,3 +18,6 @@ jobs:
       - name: 编译冒烟（build.bat，失败退出码会传播）
         shell: cmd
         run: call build.bat
+      - name: LangPref 行为回归测试
+        shell: cmd
+        run: call test_langpref.bat
