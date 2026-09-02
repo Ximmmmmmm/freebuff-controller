@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.4.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.4.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.3.1.0")]
 
 namespace FreebuffController
 {
@@ -2320,7 +2320,6 @@ namespace FreebuffController
             ExtractZip(dest, extractDir);
             string stagedApp = Path.Combine(extractDir, "app.asar");
             string stagedUi = Path.Combine(extractDir, "ui");
-            string stagedLang = Path.Combine(extractDir, "lang-pref.md");
             if (!File.Exists(stagedApp) || !Directory.Exists(stagedUi))
                 throw new ApplicationException("汉化包内容不完整（缺 app.asar 或 ui/）");
 
@@ -2332,9 +2331,6 @@ namespace FreebuffController
             string outUi = Path.Combine(output, "ui");
             if (Directory.Exists(outUi)) Directory.Delete(outUi, true);
             CopyDir(stagedUi, outUi);
-            // 语言偏好正文（旧版包没有这个文件，缺省时「应用汉化」会提示跳过）
-            if (File.Exists(stagedLang))
-                File.Copy(stagedLang, Path.Combine(output, "lang-pref.md"), true);
 
             // The staged copy is the source of truth now — the temp zip and
             // unpack dir have served their purpose.
@@ -2641,28 +2637,21 @@ namespace FreebuffController
             ThreadPool.QueueUserWorkItem(delegate
             {
                 Exception error = null;
-                string langNote = null;
                 try
                 {
                     BackupPristineIfNeeded();
                     File.Copy(Path.Combine(build, "app.asar"),
                         Path.Combine(FreebuffResources, "app.asar"), true);
                     ReplaceUiDir(Path.Combine(build, "ui"));
-                    // 界面替换成功后再配语言，顺序与语义同 hanhua 的 apply.sh；
-                    // LangPref 自身不抛异常，不会把语言失败误报成汉化失败
-                    langNote = LangPref.Install(Path.Combine(build, "lang-pref.md"));
                 }
                 catch (Exception ex) { error = ex; }
                 Interlocked.Exchange(ref hanhuaBusy, 0);
                 UiSafe(delegate
                 {
                     if (IsDisposed) return;
-                    if (error != null)
-                        SetStatus("应用汉化失败：" + HanhuaErrorText(error));
-                    else
-                        SetStatus("汉化已应用 ✓ 重启 Freebuff 生效。"
-                            + (langNote == null ? "" : " " + langNote));
-                    if (langNote != null && langNote.StartsWith("WARN")) Info(langNote);
+                    SetStatus(error == null
+                        ? "汉化已应用 ✓ 重启 Freebuff 生效。"
+                        : "应用汉化失败：" + HanhuaErrorText(error));
                     RefreshHanhuaUi();
                 });
             });
@@ -2698,26 +2687,20 @@ namespace FreebuffController
             ThreadPool.QueueUserWorkItem(delegate
             {
                 Exception error = null;
-                string langNote = null;
                 try
                 {
                     File.Copy(Path.Combine(bk, "app.asar"),
                         Path.Combine(FreebuffResources, "app.asar"), true);
                     ReplaceUiDir(Path.Combine(bk, "ui"));
-                    // 与 hanhua 的 restore.sh 对齐：还原英文时把语言偏好段一并摘掉
-                    langNote = LangPref.Uninstall();
                 }
                 catch (Exception ex) { error = ex; }
                 Interlocked.Exchange(ref hanhuaBusy, 0);
                 UiSafe(delegate
                 {
                     if (IsDisposed) return;
-                    if (error != null)
-                        SetStatus("还原失败：" + HanhuaErrorText(error));
-                    else
-                        SetStatus("已还原英文原版 ✓ 重启 Freebuff 生效。"
-                            + (langNote == null ? "" : " " + langNote));
-                    if (langNote != null && langNote.StartsWith("WARN")) Info(langNote);
+                    SetStatus(error == null
+                        ? "已还原英文原版 ✓ 重启 Freebuff 生效。"
+                        : "还原失败：" + HanhuaErrorText(error));
                     RefreshHanhuaUi();
                 });
             });

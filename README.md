@@ -60,22 +60,6 @@ SHA512 校验并落到 `hanhua/output/`，状态栏提示后点「应用汉化�
 若最新包适配的是别的 Freebuff 版本（targetVersion 不匹配），不再静默跳过，而是
 在状态栏提示「最新汉化包 vX 适配 Freebuff vY，本机是 vZ」，等待版本追上后自动恢复检查。
 
-### AI 回复语言（v1.4 起）
-
-界面之外，「应用汉化」还会往 `~/.AGENTS.md` 写一段「始终使用简体中文回复」的指令，
-让智能体也跟着说中文 —— Freebuff 的 orchestrator 每次新建会话都会无条件读取这个文件
-并注入系统提示词，所以不必改动任何专有产物；界面上的「包含 AGENTS.md」勾选只管项目根
-那一份，与此无关。
-
-- 正文与标记段**来自汉化包的 `output/lang-pref.md`**，与汉化包 `apply.sh` 用的是同一份，
-  两条安装路径写出的内容逐字节一致；下载旧版汉化包（没有这个文件）时会在状态栏提示跳过
-- **只增删夹在 `# >>> freebuff-zh:lang-pref >>>` / `# <<< freebuff-zh:lang-pref <<<`
-  之间的段落**，你 `~/.AGENTS.md` 里的自有内容按字节保留；重复应用不会堆叠
-- 「还原英文」会精确移除这一段（移除后若文件只剩空白则连文件一起删除）
-- **永久关闭**：在 `~/.AGENTS.md` 的标记段之外另起一行写 `freebuff-zh:lang-pref:off`，
-  或设环境变量 `FREEBUFF_ZH_NO_LANG=1` 后再应用汉化
-- 只对**新建的会话**生效；语言段被手工改坏（缺结束标记）时不改动文件，只在状态栏提示
-
 Freebuff 的 automatic updates overwrite the localization pack's patched files.
 The controller shows the localization status at the bottom of its window and offers
 one-click **apply / restore** (the first apply backs up the pristine English files,
@@ -97,11 +81,7 @@ build.bat
 %SystemRoot%\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -target:winexe ^
   -optimize+ -codepage:65001 ^
   -r:System.dll -r:System.Core.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll -r:System.Management.dll ^
-  -win32icon:app.ico -out:FreebuffController.exe FreebuffController.cs LangPref.cs
-```
-
-```
-test_langpref.bat    # 单独编译并运行 LangPref 的行为回归测试（10 组用例，不依赖 WinForms）
+  -win32icon:app.ico -out:FreebuffController.exe FreebuffController.cs
 ```
 
 > 源码需兼容 C# 5（系统自带编译器的语言版本）。
@@ -109,11 +89,8 @@ test_langpref.bat    # 单独编译并运行 LangPref 的行为回归测试（10
 ## 项目结构 / Structure
 
 ```
-├── FreebuffController.cs   # 主程序（UI + 多开 / 汉化 / 更新逻辑）
-├── LangPref.cs             # ~/.AGENTS.md 语言偏好段的写入与移除（与汉化包 apply.sh 同语义）
-├── LangPrefTest.cs         # LangPref 的行为回归测试（控制台）
+├── FreebuffController.cs   # 全部源码（UI + 逻辑）
 ├── build.bat               # 一键编译脚本
-├── test_langpref.bat       # 一键编译并运行上述回归测试
 ├── make-icon.ps1           # 图标生成脚本（多尺寸 PNG-in-ICO）
 └── app.ico                 # 应用图标
 ```
