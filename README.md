@@ -57,6 +57,8 @@ Freebuff 的自动更新会用原版文件覆盖[汉化包](https://github.com/X
 每 30 分钟检查一次 pack Release（与 Freebuff 更新检查共用同一条代理链），当包的
 targetVersion 与本机 Freebuff 版本一致且 packVersion 比已装/已暂存的新时，自动下载、
 SHA512 校验并落到 `hanhua/output/`，状态栏提示后点「应用汉化」即可换上新包。
+若最新包适配的是别的 Freebuff 版本（targetVersion 不匹配），不再静默跳过，而是
+在状态栏提示「最新汉化包 vX 适配 Freebuff vY，本机是 vZ」，等待版本追上后自动恢复检查。
 
 Freebuff 的 automatic updates overwrite the localization pack's patched files.
 The controller shows the localization status at the bottom of its window and offers

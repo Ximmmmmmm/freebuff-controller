@@ -2233,11 +2233,12 @@ namespace FreebuffController
             {
                 Exception error = null;
                 string packVer = null;
-                try { packVer = FetchAndStageLatestPack(dir, instVer); }
+                string mismatch = null;
+                try { packVer = FetchAndStageLatestPack(dir, instVer, out mismatch); }
                 catch (Exception ex) { error = ex; }
                 Interlocked.Exchange(ref packBusy, 0);
 
-                string ver = packVer, err = error == null ? null : error.Message;
+                string ver = packVer, err = error == null ? null : error.Message, mis = mismatch;
                 UiSafe(delegate
                 {
                     if (IsDisposed) return;
@@ -2245,15 +2246,20 @@ namespace FreebuffController
                         SetStatus("汉化包更新失败：" + err);
                     else if (ver != null)
                         SetStatus("汉化包 v" + ver + " 已就绪 · 点「应用汉化」生效。");
+                    else if (mis != null)
+                        SetStatus(mis);
                     RefreshHanhuaUi();
                 });
             });
         }
 
         // Returns the fetched pack version, or null when there is nothing
-        // newer to stage.
-        private static string FetchAndStageLatestPack(string hanhuaDir, string installedVersion)
+        // newer to stage. mismatch is set when a newer pack exists but its
+        // target Freebuff version doesn't match the installed one — the
+        // reason nothing was downloaded is user-visible then, not silent.
+        private static string FetchAndStageLatestPack(string hanhuaDir, string installedVersion, out string mismatch)
         {
+            mismatch = null;
             string releaseJson = FetchUrlBody(PackReleasesApiUrl);
             if (releaseJson == null) return null;
             var rel = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(releaseJson);
@@ -2280,7 +2286,6 @@ namespace FreebuffController
             string asset = man["asset"] as string;
             string sha512 = man["sha512"] as string;
             if (packVersion == null || targetVersion == null || asset == null) return null;
-            if (!PackTargetsInstalled(targetVersion, installedVersion)) return null;
 
             // staged >= installed always (applying moves the stamp over), so
             // comparing against the staged stamp covers both "already newest"
@@ -2288,6 +2293,12 @@ namespace FreebuffController
             var staged = ParseLooseVersion(OutputPackVersion(hanhuaDir)) ?? new Version(0, 0, 0);
             var newest = ParseLooseVersion(packVersion);
             if (newest == null || newest.CompareTo(staged) <= 0) return null;
+            if (!PackTargetsInstalled(targetVersion, installedVersion))
+            {
+                mismatch = "最新汉化包 v" + packVersion + " 适配 Freebuff v" + targetVersion
+                    + "，本机是 v" + installedVersion + "——更新 Freebuff 后会自动检查。";
+                return null;
+            }
 
             string zipUrl = null;
             foreach (object o in assets)
