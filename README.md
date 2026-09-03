@@ -18,6 +18,7 @@ A small Windows utility that lets the Freebuff desktop app run multiple instance
 - **一键操作**：启动 / 停止 / 重置账号 / 停止全部；双击表格行直接启动
 - **两种初始化方式**：启动未初始化的实例时弹窗选择——全新登录（每个窗口用不同账号），或复制其他已登录实例的账号（下拉框只列出真正登录过的实例，并显示其邮箱），免重复登录
 - **重置换号**：清空某个实例即可换登录另一个账号
+- **中文回复**：控制器启动的每个实例默认用简体中文回复；语言偏好会写入实例私有的 `%APPDATA%\\FreebuffController\\instances\\...\\home\\.claude\\settings.json`（`language: "Chinese"`），并在 `.AGENTS.md` 中补充说明，不会修改真实用户目录。设置 `FREEBUFF_CONTROLLER_NO_LANG=1`（或兼容旧变量 `FREEBUFF_ZH_NO_LANG=1`）可关闭
 - **汉化集成**：自动检测 Freebuff 是否已应用[汉化包](https://github.com/Ximmmmmmm/freebuff-zh)（独立仓库），可一键应用 / 还原——Freebuff 更新覆盖汉化后，点一下即恢复中文界面
 - 暗色主题 UI，单文件 exe（约 22 KB，无运行时依赖）；最小化进任务栏，关闭即完全退出
 
@@ -34,10 +35,12 @@ Freebuff 是 Electron 应用，用 `requestSingleInstanceLock()` 限制单开。
 
 - `--user-data-dir=<APPDATA>\Freebuff-slot-N` — 独立 Chromium 配置文件与单实例锁
 - `FREEBUFF_DESKTOP_STATE_PATH=<user>\.config\freebuff-desktop\slots\slot-N\state.json` — 独立后端 orchestrator 状态（避开其 SQLite 文件锁）
+- `--user-data-dir=<APPDATA>\Freebuff`（主实例）或 `--user-data-dir=<APPDATA>\Freebuff-slot-N`（实例 N）— 显式固定 Chromium 配置，避免进程级 `USERPROFILE` 改变默认位置
+- `HOME` / `USERPROFILE=<APPDATA>\FreebuffController\instances\{main|slot-N}\home` — 进程级指令主目录；控制器把真实用户的 `.AGENTS.md` 复制进去并追加实例级简体中文回复偏好，Freebuff 的 `os.homedir()` 因此只读这个副本。主实例仍显式使用原来的默认 state.json，已有账号不会迁移
 
 因此 Freebuff 应用升级不会使本工具失效。
 
-The app is an Electron app that enforces a single-instance lock. This tool gives each instance its own `--user-data-dir` and its own orchestrator state file via an environment variable, so instances don't share locks — no app files are touched, and app updates don't break it.
+The app is an Electron app that enforces a single-instance lock. This tool gives each instance its own `--user-data-dir`, orchestrator state file, and instruction home via environment variables, so instances don't share locks or language instructions — no app files or real user instruction files are touched, and app updates don't break it.
 
 ## 汉化集成 / Localization
 
@@ -80,8 +83,11 @@ build.bat
 ```
 %SystemRoot%\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -target:winexe ^
   -optimize+ -codepage:65001 ^
-  -r:System.dll -r:System.Core.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll -r:System.Management.dll ^
-  -win32icon:app.ico -out:FreebuffController.exe FreebuffController.cs
+  -r:System.dll -r:System.Core.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll -r:System.Management.dll -r:System.Web.Extensions.dll ^
+  -win32icon:app.ico -out:FreebuffController.exe FreebuffController.cs LangPref.cs
+
+# LangPref 行为回归测试（Windows）：
+test_langpref.bat
 ```
 
 > 源码需兼容 C# 5（系统自带编译器的语言版本）。
@@ -89,8 +95,11 @@ build.bat
 ## 项目结构 / Structure
 
 ```
-├── FreebuffController.cs   # 全部源码（UI + 逻辑）
+├── FreebuffController.cs   # 主程序（UI + 多开 / 汉化 / 更新逻辑）
+├── LangPref.cs             # 每个实例私有配置、.AGENTS.md 与中文偏好
+├── LangPrefTest.cs         # LangPref 行为回归测试
 ├── build.bat               # 一键编译脚本
+├── test_langpref.bat       # 编译并运行语言偏好回归测试
 ├── make-icon.ps1           # 图标生成脚本（多尺寸 PNG-in-ICO）
 └── app.ico                 # 应用图标
 ```
