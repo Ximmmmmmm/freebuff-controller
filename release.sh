@@ -10,7 +10,15 @@ REPO="Ximmmmmmm/freebuff-controller"
 WINHERE="$(cygpath -w "$HERE")"
 
 cd "$HERE"
-cmd //c build.bat
+# Build the single-file exe directly with csc. Avoid `cmd //c build.bat`,
+# which git-bash can't invoke when a sandbox blocks cmd.
+CSC="${SYSTEMROOT:-C:\Windows}/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+"$CSC" -nologo -target:winexe -platform:anycpu -optimize+ -codepage:65001 \
+  -r:System.dll -r:System.Core.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll -r:System.Management.dll \
+  -r:System.IO.Compression.dll -r:System.IO.Compression.FileSystem.dll \
+  -win32icon:"app.ico" -out:"FreebuffController.exe" "FreebuffController.cs" \
+  || { echo "BUILD FAILED（csc 编译出错，详见上方）" >&2; exit 1; }
+echo "built FreebuffController.exe"
 
 VER="$(powershell -NoProfile -Command "(Get-Item '${WINHERE}\\FreebuffController.exe').VersionInfo.FileVersion" | tr -d '\r' | sed 's/\.[0-9]*$//')"
 TAG="v${VER}"
