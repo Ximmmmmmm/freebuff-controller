@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.3.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.3.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.2.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.3.2.0")]
 
 namespace FreebuffController
 {
@@ -172,6 +172,11 @@ namespace FreebuffController
         private Button btnHanhuaApply;
         private Button btnHanhuaRestore;
         private string hanhuaDir; // located hanhua/ repo; null = not found yet
+        // Last Freebuff version the live hanhua status was refreshed against.
+        // When it changes (auto-update / reinstall), Freebuff's updater has
+        // just overwritten the localized files — so refresh the hanhua status
+        // and re-check for a pack right away instead of waiting 30 minutes.
+        private string hanhuaRecheckVersion;
         private int hanhuaBusy;
 
         [DllImport("dwmapi.dll")]
@@ -183,6 +188,7 @@ namespace FreebuffController
                 throw new ApplicationException(
                     "未找到 Freebuff 桌面版：\n" + FreebuffExe + "\n\n请先安装 Freebuff。");
             installedVersion = ReadInstalledVersion();
+            hanhuaRecheckVersion = installedVersion; // startup refresh below
             BuildUi();
         }
 
@@ -1075,6 +1081,29 @@ namespace FreebuffController
         {
             string v = ReadInstalledVersion();
             if (!string.IsNullOrEmpty(v)) installedVersion = v;
+            RefreshHanhuaLive();
+        }
+
+        // Keep the hanhua status / 应用汉化 button in step with the installed
+        // Freebuff version. Freebuff's auto-updater replaces the localized
+        // app.asar and ui/ with the English originals, so once the installed
+        // version changes the on-screen status can lag the real disk state
+        // until the 30-minute version timer. Re-armed here (on the 3s grid
+        // refresh and every version check), it re-reads the hanhua state and
+        // re-checks for a newer pack immediately. Refresh-only: it never
+        // applies anything on its own — the user still clicks 应用汉化.
+        private void RefreshHanhuaLive()
+        {
+            if (IsDisposed) return;
+            string now = installedVersion;
+            if (string.IsNullOrEmpty(now) || now == hanhuaRecheckVersion) return;
+            hanhuaRecheckVersion = now;
+            UiSafe(delegate
+            {
+                if (IsDisposed) return;
+                RefreshHanhuaUi();
+                CheckPackUpdateAsync();
+            });
         }
 
         // electron-updater's generic provider config ships with the app and
@@ -1522,6 +1551,10 @@ namespace FreebuffController
                     {
                         if (IsDisposed) return;
                         ApplyToGrid(mainRunning, slots, accounts);
+                        // Freebuff's auto-update can change the installed
+                        // version mid-session; when it does, bring the hanhua
+                        // status / pack check up to date right away.
+                        RefreshInstalledVersion();
                     });
                 }
                 catch { }
