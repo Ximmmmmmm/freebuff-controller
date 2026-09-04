@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.3.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.3.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.3.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.3.3.0")]
 
 namespace FreebuffController
 {
@@ -100,7 +100,7 @@ namespace FreebuffController
         private static readonly Regex YamlVersionRegex = new Regex("(?m)^\\s*version:\\s*'?([^'\"\\r\\n]+)");
         private static readonly Regex YamlPathRegex = new Regex("(?m)^\\s*path:\\s*(\\S+)");
         private static readonly Regex YamlShaRegex = new Regex("(?m)^\\s*sha512:\\s*(\\S+)");
-        private static readonly Regex LooseVersionRegex = new Regex("(\\d+)\\.(\\d+)(?:\\.(\\d+))?");
+        private static readonly Regex LooseVersionRegex = new Regex("(\\d+)\\.(\\d+)(?:\\.(\\d+))?(?:\\.(\\d+))?");
 
         // palette
         private static readonly Color ColBg = Color.FromArgb(24, 26, 32);
@@ -1169,19 +1169,23 @@ namespace FreebuffController
             return null;
         }
 
-        // "0.0.76.0" (exe) and "0.0.76" (feed) must compare equal, so only
-        // major.minor.build are kept. Returns null when unparsable.
+        // "0.0.76.0" (exe) and "0.0.76" (feed) must compare equal, so missing
+        // segments default to 0. The 4th segment matters only for packVersion
+        // (e.g. 0.0.86.1 re-releases of the same target version) — the Freebuff
+        // app itself never uses it. Returns null when unparsable.
         private static Version ParseLooseVersion(string s)
         {
             if (string.IsNullOrEmpty(s)) return null;
             Match m = LooseVersionRegex.Match(s);
             if (!m.Success) return null;
-            int build;
+            int build, revision;
             int.TryParse(m.Groups[3].Value, out build);
+            int.TryParse(m.Groups[4].Value, out revision);
             return new Version(
                 int.Parse(m.Groups[1].Value),
                 int.Parse(m.Groups[2].Value),
-                build);
+                build,
+                revision);
         }
 
         private bool UpdateAvailable()
@@ -2323,7 +2327,7 @@ namespace FreebuffController
             // staged >= installed always (applying moves the stamp over), so
             // comparing against the staged stamp covers both "already newest"
             // and "already downloaded, waiting to be applied".
-            var staged = ParseLooseVersion(OutputPackVersion(hanhuaDir)) ?? new Version(0, 0, 0);
+            var staged = ParseLooseVersion(OutputPackVersion(hanhuaDir)) ?? new Version(0, 0, 0, 0);
             var newest = ParseLooseVersion(packVersion);
             if (newest == null || newest.CompareTo(staged) <= 0) return null;
             if (!PackTargetsInstalled(targetVersion, installedVersion))
@@ -2428,7 +2432,7 @@ namespace FreebuffController
             var outV = ParseLooseVersion(outPack);
             var insV = ParseLooseVersion(InstalledPackVersion());
             bool newerPack = build != null && outV != null
-                && outV.CompareTo(insV ?? new Version(0, 0, 0)) > 0;
+                && outV.CompareTo(insV ?? new Version(0, 0, 0, 0)) > 0;
 
             if (applied)
                 hanhuaLabel.Text = newerPack
