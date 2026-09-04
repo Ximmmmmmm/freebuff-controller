@@ -1,8 +1,8 @@
 // Freebuff 多开控制器 — native single-file build (csc.exe, .NET Framework).
 // Dark-themed WinForms UI. Each slot (1-9) is an independent Freebuff
-// instance: its own Chromium profile (--user-data-dir), orchestrator state
-// file (FREEBUFF_DESKTOP_STATE_PATH), and instruction home, so every window
-// can stay logged in to a different account and use its own reply language.
+// instance: its own Chromium profile (--user-data-dir) and its own
+// orchestrator state file (FREEBUFF_DESKTOP_STATE_PATH), so every window can
+// stay logged in to a different account.
 //
 // Rebuild: run build.bat in this folder.
 
@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.4.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.4.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.2.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.3.2.0")]
 
 namespace FreebuffController
 {
@@ -93,10 +93,6 @@ namespace FreebuffController
         private static readonly string DefaultState = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".config\\freebuff-desktop\\state.json");
-
-        private static readonly string DefaultUserData = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "Freebuff");
 
         private static readonly Regex SlotRegex = new Regex("Freebuff-slot-(\\d)(?!\\d)");
         private static readonly Regex EmailRegex = new Regex("\"email\"\\s*:\\s*\"([^\"]+)\"");
@@ -600,17 +596,6 @@ namespace FreebuffController
                 "Freebuff-slot-" + n);
         }
 
-        // Each launched process gets a persistent home for ~/.AGENTS.md. It is
-        // separate from the real user home and from Chromium's profile, while
-        // the explicit state path below keeps existing accounts untouched.
-        private static string InstanceHome(int n)
-        {
-            string root = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "FreebuffController\\instances");
-            return Path.Combine(root, n == 0 ? "main" : ("slot-" + n), "home");
-        }
-
         private static HashSet<int> QueryRunning(out bool mainRunning)
         {
             var slots = new HashSet<int>();
@@ -914,7 +899,6 @@ namespace FreebuffController
         // bypasses it implicitly and NO_PROXY says so for the children.
         private static void ApplyLaunchProxy(ProcessStartInfo psi, string url)
         {
-            if (psi == null || string.IsNullOrEmpty(url)) return;
             psi.Arguments = (psi.Arguments.Length > 0 ? psi.Arguments + " " : "")
                 + "--proxy-server=" + url;
             psi.EnvironmentVariables["HTTP_PROXY"] = url;
@@ -1636,10 +1620,10 @@ namespace FreebuffController
                     copyFrom = dlg.CopyFrom;
                 }
             }
-            string languageNote;
             try
             {
-                languageNote = (rowIndex == 0) ? StartMain() : StartSlot(rowIndex, copyFrom);
+                if (rowIndex == 0) StartMain();
+                else StartSlot(rowIndex, copyFrom);
             }
             catch (Exception ex)
             {
@@ -1647,10 +1631,7 @@ namespace FreebuffController
                     "启动失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
-            SetStatus(what + " 启动中…"
-                + ((languageNote != null && languageNote.StartsWith("WARN", StringComparison.Ordinal))
-                    ? "（语言偏好未写入）" : "")
-                + "（几秒后自动确认）");
+            SetStatus(what + " 启动中…（几秒后自动确认）");
             Delay(6000, delegate { VerifyLaunched(rowIndex, what); });
         }
 
@@ -2110,10 +2091,8 @@ namespace FreebuffController
         {
             TryDeleteDir(SlotStateDir(idx));
             TryDeleteDir(SlotUserData(idx));
-            TryDeleteDir(InstanceHome(idx));
             bool clean = !Directory.Exists(SlotStateDir(idx))
-                      && !Directory.Exists(SlotUserData(idx))
-                      && !Directory.Exists(InstanceHome(idx));
+                      && !Directory.Exists(SlotUserData(idx));
             if (clean || attemptsLeft <= 1)
             {
                 SetStatus(clean
@@ -2125,36 +2104,22 @@ namespace FreebuffController
             Delay(1500, delegate { TryDeleteWithRetry(idx, attemptsLeft - 1); });
         }
 
-        private static string StartMain()
+        private static void StartMain()
         {
-            // Preserve the established main state location explicitly because
-            // USERPROFILE below is intentionally changed for this process.
-            var psi = new ProcessStartInfo(FreebuffExe);
-            psi.UseShellExecute = false;
-            psi.Arguments = "--user-data-dir=\"" + DefaultUserData + "\"";
-            string languageNote = ApplyInstanceEnvironment(psi, 0, DefaultState);
-            ApplyLaunchProxy(psi, LaunchProxyUrl());
+            string url = LaunchProxyUrl();
+            if (url == null)
+            {
+                Process.Start(new ProcessStartInfo(FreebuffExe) { UseShellExecute = true });
+                return;
+            }
+            var psi = new ProcessStartInfo(FreebuffExe) { UseShellExecute = false };
+            ApplyLaunchProxy(psi, url);
             Process.Start(psi);
-            return languageNote;
-        }
-
-        // Configure the environment consumed by Node's os.homedir() and by
-        // child orchestrator processes. The controller itself keeps its real
-        // home, so its state/account polling continues using existing paths.
-        private static string ApplyInstanceEnvironment(
-            ProcessStartInfo psi, int n, string statePath)
-        {
-            string home = InstanceHome(n);
-            string languageNote = LangPref.Prepare(home);
-            psi.EnvironmentVariables["HOME"] = home;
-            psi.EnvironmentVariables["USERPROFILE"] = home;
-            psi.EnvironmentVariables["FREEBUFF_DESKTOP_STATE_PATH"] = statePath;
-            return languageNote;
         }
 
         // copyFrom: -1 = fresh login, 0 = main instance, 1..9 = that slot.
         // Only matters when the slot has no state yet.
-        private static string StartSlot(int n, int copyFrom)
+        private static void StartSlot(int n, int copyFrom)
         {
             string state = SlotStatePath(n);
             if (!File.Exists(state))
@@ -2179,10 +2144,9 @@ namespace FreebuffController
             psi.FileName = FreebuffExe;
             psi.UseShellExecute = false;
             psi.Arguments = "--user-data-dir=\"" + SlotUserData(n) + "\"";
-            string languageNote = ApplyInstanceEnvironment(psi, n, state);
+            psi.EnvironmentVariables["FREEBUFF_DESKTOP_STATE_PATH"] = state;
             ApplyLaunchProxy(psi, LaunchProxyUrl());
             Process.Start(psi);
-            return languageNote;
         }
 
         // One WMI pass for however many targets we are stopping, so
