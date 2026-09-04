@@ -6,3 +6,6 @@ FreebuffController.exe
 # local artifacts
 ui-check.png
 *.log
+
+# backup artifacts
+*.bak
