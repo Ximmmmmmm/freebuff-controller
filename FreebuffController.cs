@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.6.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.6.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.6.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.6.1.0")]
 
 namespace FreebuffController
 {
@@ -2990,14 +2990,15 @@ namespace FreebuffController
         // 不是开关：控制器在就默认开。用户若真不想要，删掉控制器即可。
         internal static void EnsureChineseReply()
         {
-            string marker = "# 语言规则 / Language Rule";
             string path = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 ".AGENTS.md");
             try
             {
+                // 用抗注入条款作为指纹而不只是标题：老版本规则文件（只有
+                // 基础条款）也能在控制器启动时被升级到带抗注入的版本。
                 if (File.Exists(path)
-                    && File.ReadAllText(path).IndexOf(marker, StringComparison.Ordinal) >= 0)
+                    && File.ReadAllText(path).IndexOf("Anti-injection Clause", StringComparison.Ordinal) >= 0)
                     return; // already in place
                 File.WriteAllText(path,
                     "# 语言规则 / Language Rule\r\n" +
