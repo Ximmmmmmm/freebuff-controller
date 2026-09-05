@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.4.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.4.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.5.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.5.0.0")]
 
 namespace FreebuffController
 {
@@ -1006,11 +1006,13 @@ namespace FreebuffController
             catch { return null; }
         }
 
-        // GET the session endpoint and summarize the quota windows.
-        // Prefers freeWindows (今日/本周/本月 three windows); falls back to the
-        // tightest per-model remaining when the response lacks it. Routes are
-        // tried in OrderedCandidates() order; only a route-level failure moves
-        // on to the next one.
+        // GET the session endpoint and summarize the quota.
+        // v0.0.88+ switched the allowance model from per-window session counts
+        // (freeWindows) to Freebucks: a daily pool + a persistent wallet, spent
+        // per-hour per model. Prefer freebucks when the response carries it;
+        // fall back to freeWindows (今日/本周/本月) and then the per-model
+        // remaining. Routes are tried in OrderedCandidates() order; only a
+        // route-level failure moves on to the next one.
         private static QuotaInfo FetchQuota(string token)
         {
             foreach (string candidate in OrderedCandidates())
@@ -1034,10 +1036,10 @@ namespace FreebuffController
             return (d != null && d.TryGetValue(key, out v)) ? Convert.ToDouble(v) : 0;
         }
 
-        private static bool DictBool(Dictionary<string, object> d, string key)
+        private static Dictionary<string, object> DictObj(Dictionary<string, object> d, string key)
         {
             object v;
-            return d != null && d.TryGetValue(key, out v) && v is bool && (bool)v;
+            return (d != null && d.TryGetValue(key, out v)) ? v as Dictionary<string, object> : null;
         }
 
         private static string DictText(Dictionary<string, object> d, string key)
@@ -1075,6 +1077,11 @@ namespace FreebuffController
                 req.Timeout = 8000;
                 req.ReadWriteTimeout = 8000;
                 req.Headers["Authorization"] = "Bearer " + token;
+                // v0.0.88+ 的 Freebucks 额度只有带这两个 header 才会返回
+                // （orchestrator 的 refreshTier 同样带这两个头）；
+                // 缺了它们服务器只回旧的 freeWindows（日/周/月）。
+                req.Headers["x-freebuff-multi-session"] = "1";
+                req.Headers["x-freebuff-include-unused-rate-limits"] = "1";
                 req.UserAgent = "FreebuffMultiOpenController/1.0";
                 using (var resp = (HttpWebResponse)req.GetResponse())
                 using (var sr = new System.IO.StreamReader(resp.GetResponseStream()))
@@ -1084,33 +1091,67 @@ namespace FreebuffController
                     var body = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(raw);
                     if (body == null) return new QuotaInfo { Text = "—" };
 
-                    // Preferred: the three free-session windows the app itself
-                    // shows. Day resets at Pacific midnight, week is a rolling
-                    // 7-day window, month resets on the 1st.
-                    var fw = body.ContainsKey("freeWindows") ? body["freeWindows"] as Dictionary<string, object> : null;
-                    if (fw != null && fw.ContainsKey("dayLimit"))
+                    // v0.0.88+：额度模型改为 Freebucks——每日额度（Freebucks）+
+                    // 持久钱包 + 每日/每月美元消费上限。实测响应结构：
+                    //   daily: { limit, spent, remaining, resetAt }
+                    //   wallet: { balance, monthlyBonus }
+                    //   spend: { limitUsd, resetAt }（每日美元消费上限）
+                    //   monthly: { limitUsd, spentUsd, remainingUsd, resetAt }
+                    //   balance / planId / prices（模型每小时 Freebucks 单价）
+                    var fb = DictObj(body, "freebucks");
+                    if (fb != null && fb.ContainsKey("daily"))
                     {
-                        double du = DictNum(fw, "dayUsed"), dl = DictNum(fw, "dayLimit");
-                        double wu = DictNum(fw, "weekUsed"), wl = DictNum(fw, "weekLimit");
-                        double mu = DictNum(fw, "monthUsed"), ml = DictNum(fw, "monthLimit");
-                        bool suspended = DictBool(fw, "suspended");
-                        QuotaInfo qi = new QuotaInfo();
-                        qi.Text = "日" + FmtNum(du) + "/" + FmtNum(dl)
-                            + " 周" + FmtNum(wu) + "/" + FmtNum(wl)
-                            + " 月" + FmtNum(mu) + "/" + FmtNum(ml)
-                            + (suspended ? "（暂停）" : "");
-                        qi.Exhausted = (dl > 0 && du >= dl) || (wl > 0 && wu >= wl) || (ml > 0 && mu >= ml);
-                        string dayReset = FmtReset(DictText(fw, "dayResetAt"));
-                        string monthReset = FmtReset(DictText(fw, "monthResetAt"));
-                        qi.Tip = "今日 " + FmtNum(du) + "/" + FmtNum(dl) + "，剩 " + FmtNum(Math.Max(0, dl - du))
-                            + "（太平洋时间每日 0 点重置" + (dayReset != null ? "，本地 " + dayReset : "") + "）"
-                            + "\n本周 " + FmtNum(wu) + "/" + FmtNum(wl) + "，剩 " + FmtNum(Math.Max(0, wl - wu))
-                            + "（滚动 7 天窗口，随最旧的会话过期逐步释放）"
-                            + "\n本月 " + FmtNum(mu) + "/" + FmtNum(ml) + "，剩 " + FmtNum(Math.Max(0, ml - mu))
-                            + (monthReset != null ? "（" + monthReset + " 重置）" : "")
-                            + (suspended ? "\n（免费额度已暂停）" : "");
-                        return qi;
+                        var daily = DictObj(fb, "daily");
+                        var wallet = DictObj(fb, "wallet");
+
+                        double dailyRem = DictNum(daily, "remaining");
+                        double dailyLim = DictNum(daily, "limit");
+                        double walletBal = DictNum(wallet, "balance");
+                        double monthlyBonus = DictNum(wallet, "monthlyBonus");
+
+                        // 最便宜模型的每小时单价；判断是否负担得起一次新会话。
+                        double cheapest = double.MaxValue;
+                        var prices = DictObj(fb, "prices");
+                        if (prices != null)
+                        {
+                            foreach (var pv in prices.Values)
+                            {
+                                try { cheapest = Math.Min(cheapest, Convert.ToDouble(pv)); }
+                                catch { }
+                            }
+                        }
+
+                        // 不再显示任何「日/周/月」窗口：新模型只有 Freebucks。
+                        // 单元格只给真正能花的值——今日剩余额度 + 钱包余额。
+                        var qi2 = new QuotaInfo();
+                        var parts = new List<string>();
+                        parts.Add(FmtNum(dailyRem) + "/" + FmtNum(dailyLim));
+                        if (walletBal > 0)
+                            parts.Add("钱包 " + FmtNum(walletBal));
+                        qi2.Text = string.Join("  ", parts.ToArray());
+
+                        // 耗尽判定：今日额度用完、且钱包也买不起最便宜的一小时。
+                        bool broke = dailyRem <= 0
+                            && (cheapest == double.MaxValue || walletBal < cheapest);
+                        qi2.Exhausted = broke;
+
+                        string dayReset = FmtReset(DictText(daily, "resetAt"));
+                        var tip = new System.Text.StringBuilder();
+                        tip.Append("今日 Freebucks 剩 " + FmtNum(dailyRem) + "/" + FmtNum(dailyLim));
+                        if (walletBal > 0) tip.Append("，钱包 " + FmtNum(walletBal));
+                        if (monthlyBonus > 0) tip.Append("（月赠 " + FmtNum(monthlyBonus) + "）");
+                        if (cheapest != double.MaxValue) tip.Append("\n最便宜模型每小时 " + FmtNum(cheapest) + " Freebucks");
+                        tip.Append("\n太平洋时间每日 0 点补充" + (dayReset != null ? "，本地 " + dayReset : ""));
+                        if (broke) tip.Append("\n（今日额度与钱包都不足以开始新会话）");
+                        qi2.Tip = tip.ToString();
+                        return qi2;
                     }
+
+                    // freeWindows（日/周/月会话上限）已随 v0.0.88 的 Freebucks
+                    // 模型退役：新模型不再有每周或每月的会话上限，只有每日
+                    // Freebucks 额度 + 钱包 + 美元消费上限。服务器带上述两个
+                    // header 时必回 freebucks；万一缺失（老服务端），退回
+                    // 按模型剩余兜底，不再展示周/月会话窗口。
 
                     // Fallback: tightest remaining allowance across models.
                     if (!body.ContainsKey("rateLimitsByModel")) return new QuotaInfo { Text = "—" };
