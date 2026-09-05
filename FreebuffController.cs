@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.3.3.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.3.3.0")]
+[assembly: System.Reflection.AssemblyVersion("1.4.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.4.0.0")]
 
 namespace FreebuffController
 {
@@ -128,7 +128,7 @@ namespace FreebuffController
         private int refreshBusy;
         private int quotaBusy;
         private DateTime lastQuotaFetch = DateTime.MinValue;
-        private readonly string[] quotaTexts = new string[MaxSlot + 1];
+        private readonly QuotaInfo[] quotaInfos = new QuotaInfo[MaxSlot + 1];
 
         private const string QuotaApiUrl = "https://www.codebuff.com/api/v1/freebuff/session";
 
@@ -427,7 +427,7 @@ namespace FreebuffController
             grid.RowTemplate.Height = 34;
 
             string[] headers = { "实例", "状态", "账号", "额度" };
-            int[] weights = { 14, 16, 46, 24 };
+            int[] weights = { 13, 14, 40, 33 };
             for (int c = 0; c < headers.Length; c++)
             {
                 int index = grid.Columns.Add("c" + c, headers[c]);
@@ -435,6 +435,9 @@ namespace FreebuffController
                 grid.Columns[index].SortMode = DataGridViewColumnSortMode.NotSortable;
                 grid.Columns[index].DefaultCellStyle.Padding = new Padding(12, 0, 0, 0);
             }
+            // The quota summary is three compact windows; keep it readable on
+            // high-DPI instead of letting AutoSizeColumnsMode.Fill shrink it.
+            try { grid.Columns[3].MinimumWidth = MinQuotaColumnWidth; } catch { }
 
             for (int i = 0; i <= MaxSlot; i++)
             {
@@ -724,6 +727,10 @@ namespace FreebuffController
             return url != null && url.StartsWith("socks", StringComparison.OrdinalIgnoreCase);
         }
 
+        // Best-effort minimum width for a quota cell: "日0/4 周3/14 月3/40"
+        // at 9.75pt YaHei is ~150px; 170px leaves room on 125%/150% DPI.
+        private const int MinQuotaColumnWidth = 170;
+
         // Route candidates for the controller's own requests, most preferred
         // first: manual URL → auto-detected local proxy → system proxy (null)
         // → direct (""). socks5:// entries are excluded here (HttpWebRequest
@@ -923,7 +930,7 @@ namespace FreebuffController
                     {
                         if (IsDisposed) return;
                         string token = ReadTokenFor(i);
-                        quotaTexts[i] = (token == null) ? "—" : FetchQuota(token);
+                        quotaInfos[i] = (token == null) ? new QuotaInfo { Text = "—" } : FetchQuota(token);
                     }
                 }
                 catch { }
@@ -952,12 +959,17 @@ namespace FreebuffController
         {
             for (int i = 0; i <= MaxSlot; i++)
             {
-                string q = quotaTexts[i] ?? "…";
-                bool usedUp = q.StartsWith("剩 0/");
+                QuotaInfo qi = quotaInfos[i];
+                string q = (qi != null ? qi.Text : null) ?? "…";
+                bool usedUp = qi != null && qi.Exhausted;
                 Color color = usedUp
                     ? System.Drawing.Color.FromArgb(230, 90, 90)
-                    : (q.StartsWith("剩") ? ColGreen : ColSub);
-                SetCell(grid.Rows[i], 3, q, color);
+                    : (qi != null && qi.Text != null ? ColGreen : ColSub);
+                DataGridViewRow row = grid.Rows[i];
+                SetCell(row, 3, q, color);
+                string tip = (qi != null ? qi.Tip : null) ?? "";
+                DataGridViewCell cell = row.Cells[3];
+                if (cell.ToolTipText != tip) cell.ToolTipText = tip;
             }
         }
 
@@ -994,22 +1006,65 @@ namespace FreebuffController
             catch { return null; }
         }
 
-        // GET the session endpoint and summarize the premium-pool quota.
-        // Shows the tightest remaining allowance across models. Routes are
+        // GET the session endpoint and summarize the quota windows.
+        // Prefers freeWindows (今日/本周/本月 three windows); falls back to the
+        // tightest per-model remaining when the response lacks it. Routes are
         // tried in OrderedCandidates() order; only a route-level failure moves
         // on to the next one.
-        private static string FetchQuota(string token)
+        private static QuotaInfo FetchQuota(string token)
         {
             foreach (string candidate in OrderedCandidates())
             {
-                string result = TryFetchQuota(token, candidate);
+                QuotaInfo result = TryFetchQuota(token, candidate);
                 if (result != null) return result;
             }
-            return "获取失败";
+            return new QuotaInfo { Text = "获取失败" };
+        }
+
+        private class QuotaInfo
+        {
+            public string Text;   // compact one-liner for the 额度 cell
+            public string Tip;    // hover detail; null = no tooltip
+            public bool Exhausted; // any of the windows fully used up → red cell
+        }
+
+        private static double DictNum(Dictionary<string, object> d, string key)
+        {
+            object v;
+            return (d != null && d.TryGetValue(key, out v)) ? Convert.ToDouble(v) : 0;
+        }
+
+        private static bool DictBool(Dictionary<string, object> d, string key)
+        {
+            object v;
+            return d != null && d.TryGetValue(key, out v) && v is bool && (bool)v;
+        }
+
+        private static string DictText(Dictionary<string, object> d, string key)
+        {
+            object v;
+            return (d != null && d.TryGetValue(key, out v)) ? v as string : null;
+        }
+
+        private static string FmtNum(double v)
+        {
+            return v.ToString("0.##");
+        }
+
+        // "2026-09-05T07:00:00.000Z" → "9月5日 15:00"（本地时区）
+        private static string FmtReset(string iso)
+        {
+            if (string.IsNullOrEmpty(iso)) return null;
+            try
+            {
+                DateTime t = DateTime.Parse(iso, null, System.Globalization.DateTimeStyles.RoundtripKind).ToLocalTime();
+                return t.ToString("M月d日 HH:mm");
+            }
+            catch { return null; }
         }
 
         // One network attempt; null = the route itself failed.
-        private static string TryFetchQuota(string token, string proxyCandidate)
+        private static QuotaInfo TryFetchQuota(string token, string proxyCandidate)
         {
             try
             {
@@ -1025,10 +1080,42 @@ namespace FreebuffController
                 using (var sr = new System.IO.StreamReader(resp.GetResponseStream()))
                 {
                     NoteRouteSuccess(proxyCandidate);
-                    var body = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(sr.ReadToEnd());
-                    if (body == null || !body.ContainsKey("rateLimitsByModel")) return "—";
+                    string raw = sr.ReadToEnd();
+                    var body = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(raw);
+                    if (body == null) return new QuotaInfo { Text = "—" };
+
+                    // Preferred: the three free-session windows the app itself
+                    // shows. Day resets at Pacific midnight, week is a rolling
+                    // 7-day window, month resets on the 1st.
+                    var fw = body.ContainsKey("freeWindows") ? body["freeWindows"] as Dictionary<string, object> : null;
+                    if (fw != null && fw.ContainsKey("dayLimit"))
+                    {
+                        double du = DictNum(fw, "dayUsed"), dl = DictNum(fw, "dayLimit");
+                        double wu = DictNum(fw, "weekUsed"), wl = DictNum(fw, "weekLimit");
+                        double mu = DictNum(fw, "monthUsed"), ml = DictNum(fw, "monthLimit");
+                        bool suspended = DictBool(fw, "suspended");
+                        QuotaInfo qi = new QuotaInfo();
+                        qi.Text = "日" + FmtNum(du) + "/" + FmtNum(dl)
+                            + " 周" + FmtNum(wu) + "/" + FmtNum(wl)
+                            + " 月" + FmtNum(mu) + "/" + FmtNum(ml)
+                            + (suspended ? "（暂停）" : "");
+                        qi.Exhausted = (dl > 0 && du >= dl) || (wl > 0 && wu >= wl) || (ml > 0 && mu >= ml);
+                        string dayReset = FmtReset(DictText(fw, "dayResetAt"));
+                        string monthReset = FmtReset(DictText(fw, "monthResetAt"));
+                        qi.Tip = "今日 " + FmtNum(du) + "/" + FmtNum(dl) + "，剩 " + FmtNum(Math.Max(0, dl - du))
+                            + "（太平洋时间每日 0 点重置" + (dayReset != null ? "，本地 " + dayReset : "") + "）"
+                            + "\n本周 " + FmtNum(wu) + "/" + FmtNum(wl) + "，剩 " + FmtNum(Math.Max(0, wl - wu))
+                            + "（滚动 7 天窗口，随最旧的会话过期逐步释放）"
+                            + "\n本月 " + FmtNum(mu) + "/" + FmtNum(ml) + "，剩 " + FmtNum(Math.Max(0, ml - mu))
+                            + (monthReset != null ? "（" + monthReset + " 重置）" : "")
+                            + (suspended ? "\n（免费额度已暂停）" : "");
+                        return qi;
+                    }
+
+                    // Fallback: tightest remaining allowance across models.
+                    if (!body.ContainsKey("rateLimitsByModel")) return new QuotaInfo { Text = "—" };
                     var models = body["rateLimitsByModel"] as Dictionary<string, object>;
-                    if (models == null || models.Count == 0) return "无限制";
+                    if (models == null || models.Count == 0) return new QuotaInfo { Text = "无限制" };
 
                     double bestRemaining = double.MaxValue, bestLimit = 0;
                     bool found = false;
@@ -1046,15 +1133,15 @@ namespace FreebuffController
                             found = true;
                         }
                     }
-                    if (!found) return "—";
-                    if (bestRemaining <= 0) return "剩 0/" + bestLimit + " 已用完";
-                    return "剩 " + bestRemaining + "/" + bestLimit;
+                    if (!found) return new QuotaInfo { Text = "—" };
+                    if (bestRemaining <= 0) return new QuotaInfo { Text = "剩 0/" + bestLimit + " 已用完" };
+                    return new QuotaInfo { Text = "剩 " + bestRemaining + "/" + bestLimit };
                 }
             }
             catch (WebException wex)
             {
                 var resp = wex.Response as HttpWebResponse;
-                if (resp != null && (int)resp.StatusCode == 401) return "登录过期";
+                if (resp != null && (int)resp.StatusCode == 401) return new QuotaInfo { Text = "登录过期" };
                 return null; // network-level failure — try the next route
             }
             catch { return null; }
