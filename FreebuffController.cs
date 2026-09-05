@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.5.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.5.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.6.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.6.0.0")]
 
 namespace FreebuffController
 {
@@ -45,6 +45,11 @@ namespace FreebuffController
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
+
+            // 默认回复中文：启动时确保 ~/.AGENTS.md 语言规则存在
+            // （Freebuff orchestrator 每次新会话都会把它并入系统提示词，
+            // 见 MainForm.EnsureChineseReply）。静默失败不拦启动。
+            try { MainForm.EnsureChineseReply(); } catch { }
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -145,6 +150,7 @@ namespace FreebuffController
         private static readonly Color ColNewVersion = Color.FromArgb(245, 185, 66);
 
         private Label versionLink;
+        private Label selfLink;      // "自更新" entry, top-right; visible when self-update pending
         private string installedVersion;
         private string latestVersion; // null until a check succeeds; null also = failed
         private int versionCheckBusy;
@@ -167,6 +173,17 @@ namespace FreebuffController
         private static readonly string HanhuaConfigFile = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "FreebuffController\\hanhua-path.txt");
+
+        // ~\.AGENTS.md: the user-level knowledge file Freebuff's orchestrator
+        // unconditionally folds into every new session's system prompt
+        // ("Project instructions: … Follow them for the rest of the session").
+        // A language rule there makes the agent reply in Chinese regardless of
+        // the user's input language — UI localization (hanhua) does NOT do
+        // this. Version-independent, survives Freebuff auto-updates.
+        private static readonly string UserAgentsMd = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".AGENTS.md");
+        private const string ChineseReplyMarker = "# 语言规则 / Language Rule";
 
         private Label hanhuaLabel;
         private Button btnHanhuaApply;
@@ -247,6 +264,19 @@ namespace FreebuffController
             proxyLink.Cursor = Cursors.Hand;
             proxyLink.Click += delegate { OpenProxySettings(); };
             Controls.Add(proxyLink);
+
+            // 控制器自更新入口：平时隐藏，检查到新版本时才出现（标题栏右上
+            // 角，与代理设置同一行）。点击直接走下载+自替换流程。
+            selfLink = new Label();
+            selfLink.AutoSize = false;
+            selfLink.Text = "控制器有新版本 · 自更新";
+            selfLink.Bounds = new Rectangle(330, 14, 150, 20);
+            selfLink.TextAlign = ContentAlignment.MiddleRight;
+            selfLink.ForeColor = ColNewVersion;
+            selfLink.Cursor = Cursors.Hand;
+            selfLink.Visible = false;
+            selfLink.Click += delegate { OnSelfUpdateClick(); };
+            Controls.Add(selfLink);
 
             BuildGrid();
 
@@ -333,6 +363,7 @@ namespace FreebuffController
                 RefreshInstalledVersion(); // app may have updated meanwhile
                 CheckVersionAsync();
                 CheckPackUpdateAsync();
+                CheckSelfUpdateAsync();
                 DetectProxyAsync();
                 RefreshHanhuaUi();
             };
@@ -350,6 +381,7 @@ namespace FreebuffController
             DetectProxyAsync();
             CheckVersionAsync();
             CheckPackUpdateAsync();
+            CheckSelfUpdateAsync();
         }
 
         // The standing status line spells out the two refresh cycles so the
@@ -2337,6 +2369,21 @@ namespace FreebuffController
             new Regex("<meta name=\"hanhua-pack\" content=\"([^\"]+)\"");
         private int packBusy;
 
+        // ---------- 控制器自更新 (self-update) ----------
+
+        // The controller ships as a single exe with no installer/updater of
+        // its own, so it checks its own GitHub releases for a newer tag and
+        // swaps itself out via a temp-name + cmd script (a running exe locks
+        // its own file, so in-place overwrite is impossible).
+        private const string SelfReleasesApiUrl =
+            "https://api.github.com/repos/Ximmmmmmm/freebuff-controller/releases/latest";
+        private const string SelfReleasesPageUrl =
+            "https://github.com/Ximmmmmmm/freebuff-controller/releases/latest";
+        private int selfUpdateBusy;
+        private string selfLatestVersion; // null = unknown / no newer release
+        private bool selfDownloaded;      // new exe staged, waiting for restart
+        private bool selfFailed;          // last download failed; next click opens the page
+
         // Pack version stamped into a built ui/index.html by build.sh; null
         // when the file is missing or unstamped (packs built before this
         // marker existed count as 0.0.0).
@@ -2416,6 +2463,180 @@ namespace FreebuffController
                     RefreshHanhuaUi();
                 });
             });
+        }
+
+        // ---------- 控制器自更新：检查 + 下载 + 自替换 ----------
+
+        // Compares the running exe's assembly version against the latest
+        // GitHub release tag of the controller repo. Runs on a background
+        // thread; silent when up-to-date or unreachable.
+        private void CheckSelfUpdateAsync()
+        {
+            if (Interlocked.CompareExchange(ref selfUpdateBusy, 1, 0) != 0) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string latest = null;
+                try
+                {
+                    string json = FetchUrlBody(SelfReleasesApiUrl);
+                    if (json != null)
+                    {
+                        var rel = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+                        string tag = rel == null ? null : rel["tag_name"] as string;
+                        if (tag != null)
+                        {
+                            latest = ParseLooseVersion(tag) == null ? null : tag.TrimStart('v', 'V');
+                        }
+                    }
+                }
+                catch { }
+                Interlocked.Exchange(ref selfUpdateBusy, 0);
+
+                string ver = latest;
+                UiSafe(delegate
+                {
+                    if (IsDisposed) return;
+                    var cur = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+                    var newv = ParseLooseVersion(ver);
+                    if (newv != null && cur != null && newv.CompareTo(cur) > 0)
+                    {
+                        selfLatestVersion = ver;
+                        if (selfLink != null)
+                        {
+                            selfLink.Text = "控制器 v" + ver + " 可更新 · 点击自更新";
+                            selfLink.Visible = true;
+                        }
+                        SetStatus("控制器发布了新版本 v" + ver + "，点击右上角「自更新」升级。");
+                    }
+                    else
+                    {
+                        selfLatestVersion = null; // up to date or check failed
+                        if (selfLink != null && !selfDownloaded) selfLink.Visible = false;
+                    }
+                });
+            });
+        }
+
+        // Downloads the new exe from the release assets (or falls back to the
+        // release page on failure), then swaps it in: the running exe locks
+        // its own file, so the fresh copy is staged next to it under a temp
+        // name and a small cmd script — launched detached — waits for this
+        // process to exit, replaces the exe, and restarts the controller.
+        private void OnSelfUpdateClick()
+        {
+            if (selfDownloaded)
+            {
+                Info("新版控制器已下载，下次启动本工具时自动替换生效。\r\n如需立即生效，关闭控制器后手动运行\r\n" + SelfUpdateScriptPath());
+                return;
+            }
+            if (selfFailed)
+            {
+                selfFailed = false;
+                try { Process.Start(SelfReleasesPageUrl); } catch { }
+                return;
+            }
+            if (selfLatestVersion == null) return;
+            if (Interlocked.CompareExchange(ref selfUpdateBusy, 1, 0) != 0) return;
+            string ver = selfLatestVersion;
+            SetStatus("正在下载控制器 v" + ver + "…");
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Exception error = null;
+                try
+                {
+                    string json = FetchUrlBody(SelfReleasesApiUrl);
+                    var rel = json == null ? null : new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+                    object[] assets = rel == null ? null : AsArray(rel["assets"]);
+                    string exeUrl = null, sha512 = null;
+                    if (assets != null)
+                    {
+                        foreach (object o in assets)
+                        {
+                            var a = o as Dictionary<string, object>;
+                            string name = a == null ? null : a["name"] as string;
+                            if (name != null && name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                                && name.IndexOf("setup", StringComparison.OrdinalIgnoreCase) < 0)
+                            {
+                                exeUrl = a["browser_download_url"] as string;
+                            }
+                            if (name == "sha512.txt")
+                            {
+                                // sha512.txt: "<hex>  <filename>" lines (sha512sum format);
+                                // the exe line's hex digest becomes the expected SHA512.
+                                try
+                                {
+                                    string txt = FetchUrlBody(a["browser_download_url"] as string);
+                                    if (txt != null)
+                                    {
+                                        foreach (string line in txt.Split('\n'))
+                                        {
+                                            string t = line.Trim();
+                                            int sp = t.IndexOf(' ');
+                                            if (sp > 0 && t.Substring(sp).Trim().EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                sha512 = t.Substring(0, sp).Trim().ToLowerInvariant();
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    if (exeUrl == null) throw new ApplicationException("Release 里没有找到 exe 附件");
+
+                    string exePath = Application.ExecutablePath;
+                    string exeDir = Path.GetDirectoryName(exePath);
+                    string exeName = Path.GetFileNameWithoutExtension(exePath);
+                    string staged = Path.Combine(exeDir, exeName + ".new-v" + ver + ".exe");
+                    DownloadFirstAvailable(new List<string> { exeUrl }, staged, null, null);
+
+                    // Swap script: wait for the parent (this controller) to
+                    // exit, then replace + rename + restart. %~dp0 keeps it
+                    // working regardless of the working directory.
+                    string script = SelfUpdateScriptPath();
+                    File.WriteAllText(script,
+                        "@echo off\r\n" +
+                        "timeout /t 2 /nobreak >nul\r\n" +
+                        ":wait\r\n" +
+                        "tasklist /fi \"pid eq " + Process.GetCurrentProcess().Id + "\" | find \" " + Process.GetCurrentProcess().Id + " \" >nul 2>nul\r\n" +
+                        "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n" +
+                        "move /y \"" + staged + "\" \"" + exePath + "\"\r\n" +
+                        "start \"\" \"" + exePath + "\"\r\n" +
+                        "del \"%~f0\"\r\n",
+                        new System.Text.UTF8Encoding(false));
+                    Process.Start(new ProcessStartInfo("cmd.exe", "/c \"" + script + "\"")
+                    {
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                Interlocked.Exchange(ref selfUpdateBusy, 0);
+
+                string err = error == null ? null : error.Message;
+                UiSafe(delegate
+                {
+                    if (IsDisposed) return;
+                    if (err == null)
+                    {
+                        selfDownloaded = true;
+                        SetStatus("控制器 v" + ver + " 已下载 ✓ 关闭本工具后自动替换并重启。");
+                    }
+                    else
+                    {
+                        selfFailed = true;
+                        SetStatus("控制器自更新失败：" + err + "（再点一次打开 Release 页面手动下载）");
+                    }
+                });
+            });
+        }
+
+        private static string SelfUpdateScriptPath()
+        {
+            string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
+            return Path.Combine(exeDir, "self-update.cmd");
         }
 
         // Returns the fetched pack version, or null when there is nothing
@@ -2760,6 +2981,40 @@ namespace FreebuffController
             SetStatus("已停止全部实例，稍候继续…");
             Delay(2000, action);
             return true;
+        }
+
+        // ---- 默认回复中文（~\.AGENTS.md）--------------------------------
+
+        // 每次启动控制器都静默确保家目录的 ~/.AGENTS.md 语言规则存在；
+        // 不存在（或被 Freebuff/用户删掉）就重写，始终回到“默认中文”。
+        // 不是开关：控制器在就默认开。用户若真不想要，删掉控制器即可。
+        internal static void EnsureChineseReply()
+        {
+            string marker = "# 语言规则 / Language Rule";
+            string path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".AGENTS.md");
+            try
+            {
+                if (File.Exists(path)
+                    && File.ReadAllText(path).IndexOf(marker, StringComparison.Ordinal) >= 0)
+                    return; // already in place
+                File.WriteAllText(path,
+                    "# 语言规则 / Language Rule\r\n" +
+                    "\r\n" +
+                    "**Always respond in Simplified Chinese (简体中文), regardless of the language the user writes in. This overrides any default language preference.**\r\n" +
+                    "\r\n" +
+                    "**无论我发送什么语言的消息，你都必须始终用简体中文回复。**\r\n" +
+                    "\r\n" +
+                    "- 所有可见的回复、解释、总结、错误分析、计划说明一律使用简体中文，即使我的消息是英文或其他语言。\r\n" +
+                    "- 代码、命令、文件路径、标识符、提交信息中的技术名称保持原样，不必翻译代码本身。\r\n" +
+                    "- 本规则在整个会话中始终有效，优先级高于任何默认语言设置。\r\n",
+                    new System.Text.UTF8Encoding(false));
+            }
+            catch
+            {
+                // 家目录不可写等异常：静默跳过，不拦控制器启动。
+            }
         }
 
         private void OnHanhuaApply()
