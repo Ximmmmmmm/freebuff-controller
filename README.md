@@ -18,6 +18,7 @@ A small Windows utility that lets the Freebuff desktop app run multiple instance
 - **控制器自更新**：控制器启动时与每 30 分钟会检查本仓库（Ximmmmmmm/freebuff-controller）的最新 Release tag，比自己新时右上角出现「自更新」入口——一键下载新 exe（暂存为 `*.new-v版本.exe`，SHA512 校验当 Release 附带 `sha512.txt` 时启用），退出控制器后由 `self-update.cmd` 脚本自动替换并重启；下载失败再点一次会打开 Release 页面手动下载
 - **网络路径**：检查更新、下载安装包、额度查询按「本地代理 → 系统代理 → 直连」依次尝试，并**记住上次成功的路由优先重试**。本地代理**自动探测**常见端口（7890 / 7897 / 10808 / 10809 / 1080），且为功能级探测——经代理真实请求 204 端点确认可用，SOCKS-only 端口不会误判（`socks5://` 地址仅用于启动的实例，控制器自身请求会自动跳过）。启动 Freebuff 实例同样接入：代理在运行时为实例加 `--proxy-server`（覆盖界面与内置更新器的流量）并注入 `HTTP(S)_PROXY` 环境变量（后端 orchestrator 若读取则同样走代理；回环地址始终直连），代理未运行或 `off` 时按原样启动，实例自行回落系统代理。主窗口右上角「代理设置」：实时状态、逐端口探测结果（✓ = 端口可达且功能探测通过）、修改地址、停用（off）、恢复默认——与手编 `%APPDATA%\FreebuffController\proxy.txt` 等价，保存立即生效
 - **一键操作**：启动 / 停止 / 重置账号 / 停止全部；双击表格行直接启动
+- **会话共享（所有账号共用一份聊天记录，默认开启）**：不再有「共享会话」按钮——控制器启动时（或启动未共享的实例时）自动提示并入，确认后把每个实例的 `projects` 目录变成指向**主实例会话库**的 Windows junction——之后所有窗口读写同一个 `desktop-v2.db`，聊天记录天然只有一份：A 账号额度用完，B 账号的窗口打开同一份历史直接接着聊，**不需要复制、不需要选会话**。首次开启时各实例已有的独立历史会自动合并进主库（原目录改名保留为 `projects.pre-share-*` 备份，可手动回退），登录态仍在各自 state.json 下、账号互不影响。合并由 Freebuff 自带的 `resources\bun\bun.exe` 执行内嵌脚本完成（无外部依赖），同 id 会话绝不覆盖。提示：同一时间尽量只在一个窗口聊天——两个实例同时写入同一个库可能偶发锁冲突（WAL 模式下数据不会损坏）
 - **两种初始化方式**：启动未初始化的实例时弹窗选择——全新登录（每个窗口用不同账号），或复制其他已登录实例的账号（下拉框只列出真正登录过的实例，并显示其邮箱），免重复登录
 - **重置换号**：清空某个实例即可换登录另一个账号
 - **汉化集成**：自动检测 Freebuff 是否已应用[汉化包](https://github.com/Ximmmmmmm/freebuff-zh)（独立仓库），可一键应用 / 还原——Freebuff 更新覆盖汉化后，点一下即恢复中文界面
@@ -31,6 +32,7 @@ A small Windows utility that lets the Freebuff desktop app run multiple instance
 2. 双击（或选中后点「启动」）一个未初始化的实例，在弹窗里选「全新登录」
 3. 在弹出的 Freebuff 窗口里登录该窗口要用的账号 —— 登录态会固定在这个实例
 4. 想换某个实例的账号：选中 → 「重置账号」→ 再启动登录新账号
+5. 所有实例共用一份聊天记录：启动控制器（或启动未共享的实例）时自动提示并入 → 确认 → 各实例历史并入主库，之后任何账号的窗口打开的都是同一份会话（见上方「会话共享」）
 
 ## 原理 / How it works
 
@@ -38,6 +40,9 @@ Freebuff 是 Electron 应用，用 `requestSingleInstanceLock()` 限制单开。
 
 - `--user-data-dir=<APPDATA>\Freebuff-slot-N` — 独立 Chromium 配置文件与单实例锁
 - `FREEBUFF_DESKTOP_STATE_PATH=<user>\.config\freebuff-desktop\slots\slot-N\state.json` — 独立后端 orchestrator 状态（避开其 SQLite 文件锁）
+- `~\.configreebuff-desktop\slots\slot-N\projects\<工作区>\desktop-v2.db` — 本地会话库（聊天会话线程与消息都在这里，与登录态相互独立）
+
+**会话共享原理**：主实例的会话库在 `~\.config\freebuff-desktop\projects\`。默认共享下，每个 slot 的 `projects` 目录被替换成指向它的 junction（`mklink /J`，不需要管理员权限），于是所有实例读写同一个 `desktop-v2.db`，聊天记录天然共享；各实例的登录 token 仍在自己的 `state.json` 里，账号互不影响。首次开启会把各实例已有的独立历史合并进主库，原目录改名为 `projects.pre-share-<时间戳>` 保留备份——想回退到独立模式时，关掉全部实例、删掉 junction、把备份目录改回 `projects` 即可
 
 因此 Freebuff 应用升级不会使本工具失效。
 
@@ -94,8 +99,11 @@ build.bat
 
 ```
 ├── FreebuffController.cs   # 全部源码（UI + 逻辑）
+├── handover-merge.js       # 会话合并脚本（会话共享/接力共用，编译时内嵌进 exe）
 ├── build.bat               # 一键编译脚本
 ├── make-icon.ps1           # 图标生成脚本（多尺寸 PNG-in-ICO）
+├── tools/
+│   └── embed-handover.py   # 编译前把 handover-merge.js 内嵌进 C# 源码
 └── app.ico                 # 应用图标
 ```
 

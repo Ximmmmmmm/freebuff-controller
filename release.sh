@@ -10,6 +10,10 @@ REPO="Ximmmmmmm/freebuff-controller"
 WINHERE="$(cygpath -w "$HERE")"
 
 cd "$HERE"
+# 会话接力脚本以 Base64 内嵌进 exe，编译前先刷新（优先 python3，
+# Windows 上常只有 python，fallback 过去）。
+python3 tools/embed-handover.py 2>/dev/null || python tools/embed-handover.py || \
+  { echo "EMBED FAILED（需要 python3）" >&2; exit 1; }
 # Build the single-file exe directly with csc. Avoid `cmd //c build.bat`,
 # which git-bash can't invoke when a sandbox blocks cmd.
 CSC="${SYSTEMROOT:-C:\Windows}/Microsoft.NET/Framework64/v4.0.30319/csc.exe"

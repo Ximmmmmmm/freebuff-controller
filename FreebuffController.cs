@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.6.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.6.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.7.0.0")]
 
 namespace FreebuffController
 {
@@ -50,6 +50,11 @@ namespace FreebuffController
             // （Freebuff orchestrator 每次新会话都会把它并入系统提示词，
             // 见 MainForm.EnsureChineseReply）。静默失败不拦启动。
             try { MainForm.EnsureChineseReply(); } catch { }
+
+            // 默认勾选「包含 AGENTS.md」：把主实例与全部 slot 的
+            // uiPrefs.injectAgentsMd 确保为 true（项目根 AGENTS.md 注入
+            // 依赖该开关，与家目录语言规则形成双保险）。静默失败不拦启动。
+            try { MainForm.EnsureAgentsMdEnabled(); } catch { }
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -280,6 +285,9 @@ namespace FreebuffController
 
             BuildGrid();
 
+            // 会话共享是默认行为，不再提供「共享会话」按钮：控制器启动时
+            // 检测到还有实例在使用独立会话库会自动提示并入（OnShown →
+            // CheckShareOnStartup），启动实例时也会自动触发（LaunchIndex）。
             Button btnLaunch = MakeButton("启动", 20, 436, 104, ColAccent, ColAccentHover);
             btnLaunch.Click += delegate { OnLaunch(); };
 
@@ -292,7 +300,7 @@ namespace FreebuffController
             Button btnStopAll = MakeButton("停止全部", 362, 436, 104, ColNeutral, ColNeutralHover);
             btnStopAll.Click += delegate { OnStopAll(); };
 
-            Button btnRefresh = MakeButton("刷新", 476, 436, 84, ColNeutral, ColNeutralHover);
+            Button btnRefresh = MakeButton("刷新", 475, 436, 82, ColNeutral, ColNeutralHover);
             btnRefresh.Click += delegate { SetStatus("正在刷新…"); RefreshGrid(); FetchQuotasAsync(true); };
 
             hanhuaLabel = new Label();
@@ -1771,6 +1779,13 @@ namespace FreebuffController
             t.Start();
         }
 
+        // 窗口显示后做一次默认共享检查：还有实例在用独立会话库就自动提示并入。
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            Delay(600, CheckShareOnStartup);
+        }
+
         private void LaunchIndex(int rowIndex)
         {
             string what = (rowIndex == 0) ? "主实例" : ("实例 " + rowIndex);
@@ -1782,6 +1797,18 @@ namespace FreebuffController
                 {
                     if (dlg.ShowDialog(this) != DialogResult.OK) return;
                     copyFrom = dlg.CopyFrom;
+                }
+            }
+            // 永久共享：启动前必须已接入主库（junction），否则独立会话库
+            // 会再次被当成单独一份聊天记录。还没接入就自动并入（默认共享），
+            // 迁移完成后会接着启动本实例。
+            if (rowIndex != 0)
+            {
+                string shareErr = EnsureSharedProjects(rowIndex);
+                if (shareErr != null)
+                {
+                    AskShareAll(shareErr, rowIndex);
+                    return;
                 }
             }
             try
@@ -2266,6 +2293,875 @@ namespace FreebuffController
                 return;
             }
             Delay(1500, delegate { TryDeleteWithRetry(idx, attemptsLeft - 1); });
+        }
+
+        // ---------- 会话共享 (shared sessions) ----------
+
+        // 永久共享：所有实例的 projects 目录都是指向主实例 projects 的
+        // junction（Windows 目录联接），读写同一个 desktop-v2.db。聊天记录
+        // 天然只有一份，不需要复制；登录态（state.json）仍在各自 slot 下，
+        // 账号相互独立——谁有额度谁接着聊。首次启用时把各实例已有的
+        // 独立会话库合并进主库（复用 handover-merge.js 的 list/merge，
+        // 跑在 Freebuff 自带的 resources/bun/bun.exe 上，本 exe 零依赖）。
+
+        private static string MainProjectsDir()
+        {
+            return Path.Combine(Path.GetDirectoryName(DefaultState), "projects");
+        }
+
+        private static string SlotProjectsDir(int n)
+        {
+            return Path.Combine(SlotConfigRoot(n), "projects");
+        }
+
+        private static bool IsJunction(string path)
+        {
+            try
+            {
+                return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+            }
+            catch { return false; }
+        }
+
+        // mklink /J 创建目录 junction（不需要管理员权限；只有符号链接才需要）。
+        private static bool CreateJunction(string link, string target)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("cmd.exe",
+                    "/c mklink /J \"" + link + "\" \"" + target + "\"")
+                { UseShellExecute = false, CreateNoWindow = true };
+                using (var p = Process.Start(psi)) { p.WaitForExit(15000); }
+                return IsJunction(link);
+            }
+            catch { return false; }
+        }
+
+        // 把实例 n 的 projects 接入永久共享；返回 null=成功，否则错误文本。
+        // 幂等：已是 junction 直接过；目录不存在建 junction；真实目录则先
+        // 把历史合并进主库、原目录改名备份，再建 junction。
+        private static string MigrateSlotToShared(int n)
+        {
+            string mainProjects = MainProjectsDir();
+            string slotProjects = SlotProjectsDir(n);
+            if (IsJunction(slotProjects)) return null;
+            if (!Directory.Exists(slotProjects))
+            {
+                Directory.CreateDirectory(mainProjects);
+                if (!CreateJunction(slotProjects, mainProjects))
+                    return "实例 " + n + "：创建共享目录失败";
+                return null;
+            }
+            // 真实目录（独立历史）：并入主库
+            string slotDb = SlotDbPath(n);
+            string mainDb = SlotDbPath(0);
+            bool seeded = false;
+            if (slotDb != null)
+            {
+                if (mainDb == null)
+                {
+                    // 主库还不存在：把该 slot 的 workspace 搬成主库种子。
+                    // 搬完后数据本身就已经在主库了，不能紧接着再对这个 slot
+                    // 跑 MergeAllInto——它的目录已被搬空，快照会是空库，
+                    // 会误报「没有可读的会话库」。
+                    Directory.CreateDirectory(mainProjects);
+                    foreach (string ws in Directory.GetDirectories(slotProjects))
+                    {
+                        string dst = Path.Combine(mainProjects, Path.GetFileName(ws));
+                        if (!Directory.Exists(dst))
+                            try { Directory.Move(ws, dst); } catch { }
+                    }
+                    mainDb = SlotDbPath(0);
+                    seeded = true;
+                }
+                if (!seeded && mainDb != null && mainDb != slotDb)
+                {
+                    string err = MergeAllInto(mainDb, n);
+                    if (err != null) return err;
+                }
+            }
+            string backup = slotProjects + ".pre-share-" +
+                DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            bool backedUp = false;
+            try { Directory.Move(slotProjects, backup); backedUp = true; } catch { }
+            if (!CreateJunction(slotProjects, mainProjects))
+                return "实例 " + n + "：创建共享目录失败" +
+                    (backedUp
+                        ? "（原目录已备份为 " + Path.GetFileName(backup) + "）"
+                        : "（原目录仍被占用，可能该实例的窗口没关干净，请稍后再点一次）");
+            return null;
+        }
+
+        // 把实例 n 的全部会话合并进主库（list 拿全部 id → merge）。
+        private static string MergeAllInto(string mainDb, int n)
+        {
+            string snap = null, idsFile = null, renFile = null;
+            try
+            {
+                snap = SnapshotDb(n);
+                if (snap == null) return "实例 " + n + "：没有可读的会话库";
+                string listJson = RunBunJson(FindBunExe(), ExtractHandoverScript(),
+                    "list " + Q(snap));
+                var res = new JavaScriptSerializer()
+                    .Deserialize<Dictionary<string, object>>(listJson);
+                var ids = new List<string>();
+                var arr = (res != null && res.ContainsKey("threads"))
+                    ? res["threads"] as System.Collections.IEnumerable : null;
+                if (arr != null)
+                {
+                    foreach (object o in arr)
+                    {
+                        var d = o as Dictionary<string, object>;
+                        if (d != null && d.ContainsKey("id"))
+                            ids.Add(Convert.ToString(d["id"]));
+                    }
+                }
+                if (ids.Count == 0) return null; // 没有会话，无需合并
+                idsFile = WriteJsonTempFile(ids);
+                renFile = WriteJsonTempFile(new Dictionary<string, string>());
+                string json = RunBunJson(FindBunExe(), ExtractHandoverScript(),
+                    "merge " + Q(snap) + " " + Q(mainDb) + " @" + Q(idsFile) + " @" + Q(renFile));
+                var mres = new JavaScriptSerializer()
+                    .Deserialize<Dictionary<string, object>>(json);
+                if (mres == null || !mres.ContainsKey("ok") || !Convert.ToBoolean(mres["ok"]))
+                    return "实例 " + n + "：合并失败" +
+                        (mres != null && mres.ContainsKey("error")
+                            ? "（" + Convert.ToString(mres["error"]) + "）" : "");
+                return null;
+            }
+            catch (Exception ex) { return "实例 " + n + "：" + ex.Message; }
+            finally
+            {
+                if (snap != null) try { Directory.Delete(Path.GetDirectoryName(snap), true); } catch { }
+                if (idsFile != null) try { File.Delete(idsFile); } catch { }
+                if (renFile != null) try { File.Delete(renFile); } catch { }
+            }
+        }
+
+        // 启动实例 n 前调用：永久共享下必须已接入主库。
+        // 返回 null=就绪；否则返回需要用户处理的提示。
+        // 只做无副作用的快速路径（建 junction 不需要停实例）；
+        // 真实目录（未并入的旧库）由 AskShareAll 自动统一迁移（默认共享）。
+        private static string EnsureSharedProjects(int n)
+        {
+            if (n == 0)
+            {
+                Directory.CreateDirectory(MainProjectsDir());
+                return null;
+            }
+            string slotProjects = SlotProjectsDir(n);
+            if (IsJunction(slotProjects)) return null;
+            if (!Directory.Exists(slotProjects))
+            {
+                Directory.CreateDirectory(MainProjectsDir());
+                if (!CreateJunction(slotProjects, MainProjectsDir()))
+                    return "实例 " + n + "：创建共享目录失败";
+                return null;
+            }
+            return "实例 " + n + " 还在使用独立的会话库（尚未并入主实例）。";
+        }
+
+        // 启动实例时触发的共享迁移：完成后自动接着启动这个实例（-1 = 无）。
+        private int pendingLaunchAfterShare = -1;
+
+        // 控制器启动后的默认共享检查：还有实例在用独立会话库就自动提示并入。
+        private void CheckShareOnStartup()
+        {
+            if (HasUnsharedSlot()) AskShareAll("", -1);
+        }
+
+        private bool HasUnsharedSlot()
+        {
+            for (int i = 1; i <= MaxSlot; i++)
+            {
+                string p = SlotProjectsDir(i);
+                if (Directory.Exists(p) && !IsJunction(p)) return true;
+            }
+            return false;
+        }
+
+        // 弹确认后把全部实例并入主库（默认共享）。launchIndex >= 0 表示这是
+        // 启动实例时触发的：迁移完成后自动接着启动那个实例。
+        private void AskShareAll(string why, int launchIndex)
+        {
+            var pending = new List<int>();
+            for (int i = 1; i <= MaxSlot; i++)
+            {
+                string p = SlotProjectsDir(i);
+                if (Directory.Exists(p) && !IsJunction(p)) pending.Add(i);
+            }
+            if (pending.Count == 0)
+            {
+                if (launchIndex >= 0) LaunchIndex(launchIndex); // 其实已共享，直接启动
+                else SetStatus("所有实例已经共享主实例的会话库。");
+                return;
+            }
+            if (FindBunExe() == null)
+            {
+                Info("没有找到 Bun 运行时（Freebuff 安装目录 resources\\bun\\bun.exe），\n无法合并已有会话库。");
+                return;
+            }
+            if (!Confirm(why + "有 " + pending.Count + " 个实例还在使用独立的会话库。\r\n\r\n" +
+                "要把它们并入主实例，改为永久共享吗？\r\n" +
+                "已有聊天记录会合并进主库一份，原目录保留为备份（projects.pre-share-*）。\r\n" +
+                "之后所有实例共用同一份聊天记录，登录账号仍然各自独立。\r\n" +
+                "需要先停止全部实例（正在运行的 Freebuff 窗口会被关闭），继续吗？"))
+                return;
+            string[] all = new string[MaxSlot + 1];
+            all[0] = "main";
+            for (int i = 1; i <= MaxSlot; i++) all[i] = i.ToString();
+            pendingLaunchAfterShare = launchIndex;
+            KillInstances(all);
+            SetStatus("会话共享：正在停止全部实例…");
+            Delay(1200, delegate { RunShareAllAsync(); });
+        }
+
+        private void RunShareAllAsync()
+        {
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                int[] allSlots = new int[MaxSlot + 1];
+                for (int i = 0; i <= MaxSlot; i++) allSlots[i] = i;
+                if (!WaitSlotsStopped(allSlots, 20000))
+                {
+                    // 有实例没退干净就硬跑合并，轻则个别实例报错、重则
+                    // 出现半迁移状态，所以直接中止并让用户手动关窗重试。
+                    UiSafe(delegate
+                    {
+                        if (IsDisposed) return;
+                        SetStatus("会话共享未执行");
+                        pendingLaunchAfterShare = -1;
+                        Info("共享会话：有实例没有在 20 秒内退出，已中止迁移。\r\n" +
+                            "请关闭全部 Freebuff 窗口后重新启动控制器再试。");
+                    });
+                    return;
+                }
+                var results = new List<string>();
+                for (int i = 1; i <= MaxSlot; i++)
+                {
+                    string err = MigrateSlotToShared(i);
+                    if (err != null) results.Add(err);
+                }
+                UiSafe(delegate
+                {
+                    if (IsDisposed) return;
+                    RefreshGrid();
+                    int li = pendingLaunchAfterShare;
+                    pendingLaunchAfterShare = -1;
+                    if (results.Count == 0)
+                    {
+                        SetStatus("会话共享完成 ✓ 所有实例共用主实例会话库");
+                        if (li >= 0)
+                        {
+                            // 用户本来要启动的实例：迁移完成后接着启动它。
+                            LaunchIndex(li);
+                            return;
+                        }
+                        Info("会话共享完成 ✓\r\n\r\n" +
+                            "所有实例现在共用主实例的会话库（同一份聊天记录），\r\n" +
+                            "登录账号各自独立，谁有额度谁接着聊。\r\n\r\n" +
+                            "注意：同一时间尽量只在一个窗口聊天——两个实例同时写入\r\n" +
+                            "同一个库可能偶发锁冲突（WAL 模式数据不会损坏）。");
+                    }
+                    else
+                    {
+                        SetStatus("会话共享部分完成");
+                        Info("会话共享：\r\n" + string.Join("\r\n", results) +
+                            (li >= 0 ? "\r\n\r\n迁移未全部成功，请稍后再点一次启动。" : ""));
+                    }
+                });
+            });
+        }
+
+        // ---------- 会话接力 (handover, 已弃用，被永久共享取代) ----------
+
+        // 聊天会话存在每个实例自己的本地 SQLite（projects/<workspace>/
+        // desktop-v2.db），与 state.json 里的登录 token 相互独立。接力 = 把
+        // 选定会话（threads + messages + queue_items + 收据 + 交付记录）从
+        // 一个实例的库复制进另一个实例的库，让接手的账号原样继续聊。合并
+        // 本体在 handover-merge.js 里跑，用的是 Freebuff 自带的
+        // resources/bun/bun.exe（bun:sqlite），本 exe 保持零依赖。
+
+        // handover-merge.js 的 Base64 —— 由 tools/embed-handover.py 在编译前
+        // 重新生成（build.bat / release.sh 会自动调用），改 JS 后重编译即可。
+        private const string HandoverMergeJsB64 = "Ly8gRnJlZWJ1ZmYg5aSa5byA5o6n5Yi25ZmoIOKAlCDkvJror53mjqXlipvlkIjlubbohJrmnKzjgIIKLy8KLy8g55SoIEZyZWVidWZmIOiHquW4pueahCByZXNvdXJjZXMvYnVuL2J1bi5leGUg6L+Q6KGM77yaYnVuOnNxbGl0ZSDnm7Tor7vkuKTkuKrlrp7kvovnmoQKLy8gZGVza3RvcC12Mi5kYu+8jOaKiumAieWumuS8muivne+8iHRocmVhZHMgKyBtZXNzYWdlcyArIHF1ZXVlX2l0ZW1zICsKLy8gYXV0b19ydW5fZGVjaXNpb25fcmVjZWlwdHMgKyB0aHJlYWRfZGVsaXZlcmllc++8ieS7juadpea6kOW6k+WkjeWItui/m+ebruagh+W6k+OAggovLyDmjqfliLblmajoh6rouqvkv53mjIHml6AgU1FMaXRlIOS+nei1lueahOWNleaWh+S7tiBleGXjgIIKLy8KLy8g55So5rOV77yaCi8vICAgYnVuIGhhbmRvdmVyLW1lcmdlLmpzIGxpc3QgIDxzcmNEYj4KLy8gICBidW4gaGFuZG92ZXItbWVyZ2UuanMgbWVyZ2UgPHNyY0RiPiA8ZHN0RGI+IDxpZHNKc29ufEBpZHMuanNvbj4gW3JlbmFtZXNKc29ufEByZW5hbWVzLmpzb25dCi8vIGlkcy9yZW5hbWVzIOebtOaOpeS8oCBKU09OIOaIluS8oCAiQOi3r+W+hCLvvIjmjqfliLblmajotbDmlofku7bvvIzpgb/lvIDlkb3ku6TooYzovazkuYnvvInjgIIKLy8g6L6T5Ye65LiA6KGMIEpTT07vvIhVVEYtOO+8jHN0ZG91dO+8ie+8mgovLyAgIHsib2siOnRydWUsImFjdGlvbiI6Imxpc3QiLCJ0aHJlYWRzIjpbLi4uXX0KLy8gICB7Im9rIjp0cnVlLCJhY3Rpb24iOiJtZXJnZSIsImNvcGllZCI6Wy4uLl0sInNraXBwZWQiOlsuLi5dfQovLyAgIHsib2siOmZhbHNlLCJlcnJvciI6Ii4uLiJ9Ci8vIOS7u+S9lei3r+W+hOW8guW4uOmDvei1sCBvazpmYWxzZe+8m21lcmdlIOWcqOWNleS6i+WKoemHjOWujOaIkO+8jOWksei0peWNs+aVtOS9k+Wbnua7muOAggovLwovLyDlpI3liLbop4TliJnvvJoKLy8gLSDluYLnrYnvvJrnm67moIflupPlt7LmnInnmoQgdGhyZWFkIGlkIOS4gOW+i+i3s+i/h++8jOe7neS4jeimhuebluOAggovLyAtIOW3peS9nOWMuuino+iApu+8mnRocmVhZCDmjIflkJHnm67moIflupPkuK3lkIzkuIAgcm9vdF9wYXRoIOeahCBwcm9qZWN0cyDooYzvvIjnvLrlpLHml7YKLy8gICDoh6rliqjliJvlu7rvvIzov5nmmK/kvJror53lpJbplK4gcHJvamVjdF9pZCDnmoTlvZLlsZ7vvInvvIzmnaXmupAv55uu5qCH5omT5byA5ZOq5Liq5bel5L2c5Yy6Ci8vICAg5LqS5LiN5b2x5ZON44CCCi8vIC0g5byV5pOO56eB5pyJ54q25oCB5riF6Zu277yIdHVybl9zdGF0ZSAvIGhhcm5lc3Nfc3RhdGUgLyBhdXRvX3J1biDotKbmnKwgLwovLyAgIHNwb25zb3JlZCDku6TniYwgLyBmcmVlYnVmZl9pbnN0YW5jZV9pZCAvIGF0dGVudGlvbiDmnKror7sgLyB3b3JsZF9zbmFwc2hvdO+8ie+8jAovLyAgIOaOpei/h+WOu+eahOi0puWPt+S7juW5suWHgOeahOOAjOepuumXsuOAjeS8muivnee7p+e7re+8jOS4jeiDjOS4iuS4gOi0puWPt+eahOi/kOihjOaXtuasoOi0puOAggovLyAtIOWIl+eZveWQjeWNle+8muaJgOaciSBJTlNFUlQg5Y+q5YaZ55uu5qCH5bqT55yf5a6e5a2Y5Zyo55qE5YiX77yIUFJBR01BIOS6pOmbhu+8ie+8jAovLyAgIEZyZWVidWZmIOeJiOacrOabtOabv+WinuWIoOWIl+aXtuS4jeS8muaLvOWHuuWdjyBTUUzvvJvnm67moIflupPoh6rouqvnmoTliJfov4Hnp7vkuqTnu5kKLy8gICBvcmNoZXN0cmF0b3Ig5ZCv5Yqo5pe255qEIHVwZ3JhZGUg5rWB56iL44CCCgp2YXIgRGF0YWJhc2UgPSBnbG9iYWxUaGlzLkRhdGFiYXNlIHx8IHJlcXVpcmUoImJ1bjpzcWxpdGUiKS5EYXRhYmFzZTsKCmZ1bmN0aW9uIG91dChvYmopIHsKICBwcm9jZXNzLnN0ZG91dC53cml0ZShKU09OLnN0cmluZ2lmeShvYmopICsgIlxuIik7Cn0KCi8vIGFyZ3ZbaV3vvJrlhoXogZQgSlNPTu+8jOaIliAiQGZpbGUi77yI6K+75paH5Lu26YeM55qEIEpTT07vvInjgIIKZnVuY3Rpb24gYXJnSnNvbihpLCBmYWxsYmFjaykgewogIHZhciB2ID0gcHJvY2Vzcy5hcmd2W2ldOwogIGlmICghdikgcmV0dXJuIGZhbGxiYWNrOwogIGlmICh2LmNoYXJDb2RlQXQoMCkgPT09IDY0KSB7CiAgICB2YXIgZnMgPSByZXF1aXJlKCJmcyIpOwogICAgcmV0dXJuIEpTT04ucGFyc2UoZnMucmVhZEZpbGVTeW5jKHYuc2xpY2UoMSksICJ1dGY4IikpOwogIH0KICByZXR1cm4gSlNPTi5wYXJzZSh2KTsKfQoKZnVuY3Rpb24gZGllKG1zZykgewogIG91dCh7IG9rOiBmYWxzZSwgZXJyb3I6IFN0cmluZyhtc2cpIH0pOwogIHByb2Nlc3MuZXhpdCgwKTsgLy8g5o6n5Yi25Zmo5Y+q6Kej5p6QIHN0ZG91dCBKU09O77yM6YCA5Ye656CB5peg5oSP5LmJCn0KCi8vIOWPquivu+aJk+W8gO+8m+S4h+S4gCBidW4g55qE6YCJ6aG55ZCN5a+55LiN5LiK77yM6YCA5Zue5pmu6YCa5omT5byA77yI5paH5Lu25LuN5Y+v6K+777yJ44CCCmZ1bmN0aW9uIG9wZW5STyhwYXRoKSB7CiAgdHJ5IHsKICAgIHJldHVybiBuZXcgRGF0YWJhc2UocGF0aCwgeyByZWFkb25seTogdHJ1ZSB9KTsKICB9IGNhdGNoIChlKSB7CiAgICByZXR1cm4gbmV3IERhdGFiYXNlKHBhdGgpOwogIH0KfQoKZnVuY3Rpb24gdGFibGVDb2xzKGRiLCB0YWJsZSkgewogIHJldHVybiBkYi5xdWVyeSgiUFJBR01BIHRhYmxlX2luZm8oIiArIHRhYmxlICsgIikiKS5hbGwoKS5tYXAoZnVuY3Rpb24gKGMpIHsKICAgIHJldHVybiBjLm5hbWU7CiAgfSk7Cn0KCi8vIOaKiiByb3dPYmog5pS256qE5YiwIGRzdENvbHMg6YeM5a2Y5Zyo55qE5YiX5ZCOIElOU0VSVCBPUiBJR05PUkXjgIIKZnVuY3Rpb24gaW5zZXJ0Um93KGRiLCB0YWJsZSwgcm93T2JqLCBkc3RDb2xzKSB7CiAgdmFyIGNvbHMgPSBbXTsKICB2YXIgcGFyYW1zID0ge307CiAgZm9yICh2YXIgayBpbiByb3dPYmopIHsKICAgIGlmIChkc3RDb2xzLmluZGV4T2YoaykgPCAwKSBjb250aW51ZTsKICAgIGNvbHMucHVzaChrKTsKICAgIHBhcmFtc1siJCIgKyBrXSA9IHJvd09ialtrXTsKICB9CiAgaWYgKGNvbHMubGVuZ3RoID09PSAwKSByZXR1cm47CiAgdmFyIHEgPSAiSU5TRVJUIE9SIElHTk9SRSBJTlRPICIgKyB0YWJsZSArICIgKCIgKyBjb2xzLmpvaW4oIiwgIikgKwogICAgIikgVkFMVUVTICgiICsgY29scy5tYXAoZnVuY3Rpb24gKGMpIHsgcmV0dXJuICIkIiArIGM7IH0pLmpvaW4oIiwgIikgKyAiKSI7CiAgZGIucXVlcnkocSkucnVuKHBhcmFtcyk7Cn0KCmZ1bmN0aW9uIGxpc3RUaHJlYWRzKHNyY1BhdGgpIHsKICB2YXIgc3JjID0gb3BlblJPKHNyY1BhdGgpOwogIHRyeSB7CiAgICB2YXIgY291bnRzID0ge307CiAgICB2YXIgbWMgPSBzcmMucXVlcnkoCiAgICAgICJTRUxFQ1QgdGhyZWFkX2lkLCBDT1VOVCgqKSBBUyBuIEZST00gbWVzc2FnZXMgR1JPVVAgQlkgdGhyZWFkX2lkIgogICAgKTsKICAgIGZvciAodmFyIHIgb2YgbWMuYWxsKCkpIGNvdW50c1tyLnRocmVhZF9pZF0gPSByLm47CiAgICB2YXIgdGhyZWFkcyA9IFtdOwogICAgdmFyIHJvd3MgPSBzcmMucXVlcnkoCiAgICAgICJTRUxFQ1QgaWQsIHRpdGxlLCBzdGF0dXMsIHR1cm5fc3RhdGUsIG1vZGVsLCBwcm9qZWN0X3BhdGgsIHVwZGF0ZWRfYXQiICsKICAgICAgIiBGUk9NIHRocmVhZHMgT1JERVIgQlkgdXBkYXRlZF9hdCBERVNDIgogICAgKS5hbGwoKTsKICAgIGZvciAodmFyIHQgb2Ygcm93cykgewogICAgICB0aHJlYWRzLnB1c2goewogICAgICAgIGlkOiB0LmlkLAogICAgICAgIHRpdGxlOiB0LnRpdGxlLAogICAgICAgIHN0YXR1czogdC5zdGF0dXMsCiAgICAgICAgdHVyblN0YXRlOiB0LnR1cm5fc3RhdGUsCiAgICAgICAgbW9kZWw6IHQubW9kZWwsCiAgICAgICAgcHJvamVjdFBhdGg6IHQucHJvamVjdF9wYXRoLAogICAgICAgIG1lc3NhZ2VzOiBjb3VudHNbdC5pZF0gfHwgMCwKICAgICAgICB1cGRhdGVkOiB0LnVwZGF0ZWRfYXQsCiAgICAgIH0pOwogICAgfQogICAgb3V0KHsgb2s6IHRydWUsIGFjdGlvbjogImxpc3QiLCB0aHJlYWRzOiB0aHJlYWRzIH0pOwogIH0gZmluYWxseSB7CiAgICBzcmMuY2xvc2UoKTsKICB9Cn0KCi8vIOehruS/neebruagh+W6k+WtmOWcqCByb290X3BhdGgg5a+55bqU55qEIHByb2plY3RzIOihjOW5tui/lOWbnuWFtiBpZOOAguato+W4uOaDheWGteS4i+ebruaghwovLyDlrp7kvovoh6rlt7HmiZPlvIDov4flkIzkuIDkuKrlt6XkvZzljLrjgIHooYzlt7LlrZjlnKjvvJvnvLrlpLHml7booaXkuIDooYzvvIjkvJjlhYjmsr/nlKjmnaXmupDnmoQKLy8gcHJvamVjdF9pZOKAlOKAlOWug+eUsei3r+W+hOa0vueUn++8jOWQjOS4gOWPsOacuuWZqOS4iuS4jeS8muWPmO+8m2lkIOaSnui9puaXtuaNoumaj+acuiBpZO+8ieOAggpmdW5jdGlvbiBlbnN1cmVQcm9qZWN0KGRzdCwgcm9vdFBhdGgsIHByZWZlcnJlZElkKSB7CiAgdmFyIGZvdW5kID0gZHN0CiAgICAucXVlcnkoIlNFTEVDVCBpZCBGUk9NIHByb2plY3RzIFdIRVJFIHJvb3RfcGF0aCA9ICRwIikKICAgIC5nZXQoeyAkcDogcm9vdFBhdGggfSk7CiAgaWYgKGZvdW5kKSByZXR1cm4gZm91bmQuaWQ7CiAgaWYgKHByZWZlcnJlZElkKSB7CiAgICB0cnkgewogICAgICBkc3QucXVlcnkoCiAgICAgICAgIklOU0VSVCBPUiBJR05PUkUgSU5UTyBwcm9qZWN0cyAoaWQsIHJvb3RfcGF0aCwgZGVmYXVsdF9icmFuY2gsIGNyZWF0ZWRfYXQpIiArCiAgICAgICAgIiBWQUxVRVMgKCRpZCwgJHJwLCAkZGIsICRjYSkiCiAgICAgICkucnVuKHsgJGlkOiBwcmVmZXJyZWRJZCwgJHJwOiByb290UGF0aCwgJGRiOiAibWFpbiIsICRjYTogRGF0ZS5ub3coKSB9KTsKICAgIH0gY2F0Y2ggKGUpIHsgfQogICAgZm91bmQgPSBkc3QKICAgICAgLnF1ZXJ5KCJTRUxFQ1QgaWQgRlJPTSBwcm9qZWN0cyBXSEVSRSByb290X3BhdGggPSAkcCIpCiAgICAgIC5nZXQoeyAkcDogcm9vdFBhdGggfSk7CiAgICBpZiAoZm91bmQpIHJldHVybiBmb3VuZC5pZDsKICB9CiAgdmFyIG5pZCA9IGNyeXB0by5yYW5kb21VVUlEKCk7CiAgZHN0LnF1ZXJ5KAogICAgIklOU0VSVCBJTlRPIHByb2plY3RzIChpZCwgcm9vdF9wYXRoLCBkZWZhdWx0X2JyYW5jaCwgY3JlYXRlZF9hdCkiICsKICAgICIgVkFMVUVTICgkaWQsICRycCwgJGRiLCAkY2EpIgogICkucnVuKHsgJGlkOiBuaWQsICRycDogcm9vdFBhdGgsICRkYjogIm1haW4iLCAkY2E6IERhdGUubm93KCkgfSk7CiAgcmV0dXJuIG5pZDsKfQoKZnVuY3Rpb24gbWVyZ2VUaHJlYWRzKHNyY1BhdGgsIGRzdFBhdGgsIGlkcywgcmVuYW1lcykgewogIGlmICghQXJyYXkuaXNBcnJheShpZHMpIHx8IGlkcy5sZW5ndGggPT09IDApIGRpZSgi5rKh5pyJ6KaB5o6l5Yqb55qE5Lya6K+dIik7CiAgaWYgKCFkc3RQYXRoIHx8IGRzdFBhdGggPT09IHNyY1BhdGgpIGRpZSgi55uu5qCH5bqT57y65aSx5oiW5LiO5p2l5rqQ55u45ZCMIik7CiAgaWYgKCFyZW5hbWVzIHx8IHR5cGVvZiByZW5hbWVzICE9PSAib2JqZWN0IikgcmVuYW1lcyA9IHt9OwoKICB2YXIgc3JjID0gb3BlblJPKHNyY1BhdGgpOwogIHZhciBkc3QgPSBuZXcgRGF0YWJhc2UoZHN0UGF0aCk7CiAgdmFyIGNvcGllZCA9IFtdOwogIHZhciBza2lwcGVkID0gW107CiAgdHJ5IHsKICAgIHZhciBzcmNUaHJlYWRDb2xzID0gdGFibGVDb2xzKHNyYywgInRocmVhZHMiKTsKICAgIHZhciBkc3RUaHJlYWRDb2xzID0gdGFibGVDb2xzKGRzdCwgInRocmVhZHMiKTsKICAgIHZhciBkc3RNc2dDb2xzID0gdGFibGVDb2xzKGRzdCwgIm1lc3NhZ2VzIik7CiAgICB2YXIgZHN0UXVldWVDb2xzID0gdGFibGVDb2xzKGRzdCwgInF1ZXVlX2l0ZW1zIik7CiAgICB2YXIgZHN0UmVjZWlwdENvbHMgPSB0YWJsZUNvbHMoZHN0LCAiYXV0b19ydW5fZGVjaXNpb25fcmVjZWlwdHMiKTsKICAgIHZhciBkc3REZWxpdkNvbHMgPSB0YWJsZUNvbHMoZHN0LCAidGhyZWFkX2RlbGl2ZXJpZXMiKTsKCiAgICB2YXIgcHJvakNhY2hlID0ge307CiAgICB2YXIgZHN0VGhyZWFkU3RtdCA9IG51bGw7IC8vIOavj+ihjOWIl+mbhuWPr+iDveS4jeWQjO+8jOmAkOihjOaehOW7ugoKICAgIGRzdC50cmFuc2FjdGlvbihmdW5jdGlvbiAoKSB7CiAgICAgIGZvciAodmFyIGlkIG9mIGlkcykgewogICAgICAgIHZhciB0aCA9IHNyYwogICAgICAgICAgLnF1ZXJ5KCJTRUxFQ1QgKiBGUk9NIHRocmVhZHMgV0hFUkUgaWQgPSAkaWQiKQogICAgICAgICAgLmdldCh7ICRpZDogaWQgfSk7CiAgICAgICAgaWYgKCF0aCkgewogICAgICAgICAgc2tpcHBlZC5wdXNoKGlkKTsKICAgICAgICAgIGNvbnRpbnVlOwogICAgICAgIH0KICAgICAgICB2YXIgZXhpc3RzID0gZHN0CiAgICAgICAgICAucXVlcnkoIlNFTEVDVCAxIEZST00gdGhyZWFkcyBXSEVSRSBpZCA9ICRpZCIpCiAgICAgICAgICAuZ2V0KHsgJGlkOiBpZCB9KTsKICAgICAgICBpZiAoZXhpc3RzKSB7CiAgICAgICAgICBza2lwcGVkLnB1c2goaWQpOyAvLyDluYLnrYnvvJrlkIwgaWQg5Lya6K+d57ud5LiN6KaG55uWCiAgICAgICAgICBjb250aW51ZTsKICAgICAgICB9CgogICAgICAgIHZhciByb3cgPSB7fTsKICAgICAgICBmb3IgKHZhciBjb2wgb2Ygc3JjVGhyZWFkQ29scykgcm93W2NvbF0gPSB0aFtjb2xdOwoKICAgICAgICAvLyDlvJXmk47np4HmnInnirbmgIHmuIXpm7bvvJvnm67moIflupPmsqHmnInlr7nlupTliJfml7YgaW5zZXJ0Um93IOS8muiHquWKqOS4ouW8g+OAggogICAgICAgIHJvdy5wcm9qZWN0X2lkID0gZW5zdXJlUHJvamVjdChkc3QsIHRoLnByb2plY3RfcGF0aCwgdGgucHJvamVjdF9pZCk7CiAgICAgICAgcm93LnR1cm5fc3RhdGUgPSAiaWRsZSI7CiAgICAgICAgcm93LnF1ZXVlX3BhdXNlZCA9IDA7CiAgICAgICAgcm93LmF1dG9fcnVuID0gMDsKICAgICAgICByb3cuYXV0b19ydW5fc3RhcnRlZF9hdCA9IG51bGw7CiAgICAgICAgcm93LmF1dG9fcnVuX3Bhc3NfY291bnQgPSAwOwogICAgICAgIHJvdy5hdXRvX3J1bl9yZWZpbmVtZW50X2NvdW50ID0gMDsKICAgICAgICByb3cuYXV0b19ydW5fZGVjaXNpb25fY291bnQgPSAwOwogICAgICAgIHJvdy5hdXRvX3J1bl9zdG9wcGVkX25vdGUgPSBudWxsOwogICAgICAgIHJvdy5hdXRvX3J1bl9zdG9wcGVkX2F0ID0gbnVsbDsKICAgICAgICByb3cuaGFybmVzc19zdGF0ZSA9IG51bGw7CiAgICAgICAgcm93Lmhhcm5lc3Nfc3RhdGVfaWQgPSBudWxsOwogICAgICAgIHJvdy53b3JsZF9zbmFwc2hvdCA9IG51bGw7CiAgICAgICAgcm93LmZyZWVidWZmX2luc3RhbmNlX2lkID0gbnVsbDsKICAgICAgICByb3cuc3BvbnNvcmVkID0gbnVsbDsKICAgICAgICByb3cuc3BvbnNvcmVkX3J1bl90b2tlbiA9IG51bGw7CiAgICAgICAgcm93LnNwb25zb3JlZF9zZXR0bGVkX2F0ID0gbnVsbDsKICAgICAgICByb3cuc3BvbnNvcmVkX3Rlcm1pbmFsX3JlcG9ydHMgPSBudWxsOwogICAgICAgIHJvdy5zcG9uc29yZWRfdGVybWluYWxfYWNrX2F0ID0gbnVsbDsKICAgICAgICByb3cucGVuZGluZ19icmllZnMgPSBudWxsOwogICAgICAgIHJvdy5wZW5kaW5nX2JyaWVmc19kaWFnbm9zdGljX2tleSA9IG51bGw7CiAgICAgICAgcm93LmF0dGVudGlvbl9hY2tub3dsZWRnZWRfcmV2aXNpb24gPSByb3cuYXR0ZW50aW9uX3JldmlzaW9uIHx8IDA7CiAgICAgICAgcm93LmF0dGVudGlvbl9yZWFzb24gPSBudWxsOwogICAgICAgIHJvdy5hdHRlbnRpb25fYXQgPSBudWxsOwogICAgICAgIHJvdy5sYXN0X3R1cm5fb3V0Y29tZSA9IG51bGw7CiAgICAgICAgaWYgKHJlbmFtZXNbaWRdKSByb3cudGl0bGUgPSBTdHJpbmcocmVuYW1lc1tpZF0pLnNsaWNlKDAsIDIwMCk7CiAgICAgICAgcm93LnVwZGF0ZWRfYXQgPSBEYXRlLm5vdygpOwoKICAgICAgICBpbnNlcnRSb3coZHN0LCAidGhyZWFkcyIsIHJvdywgZHN0VGhyZWFkQ29scyk7CiAgICAgICAgY29waWVkLnB1c2goaWQpOwoKICAgICAgICBmb3IgKHZhciBtIG9mIHNyYwogICAgICAgICAgLnF1ZXJ5KCJTRUxFQ1QgKiBGUk9NIG1lc3NhZ2VzIFdIRVJFIHRocmVhZF9pZCA9ICRpZCBPUkRFUiBCWSBzZXEiKQogICAgICAgICAgLmFsbCh7ICRpZDogaWQgfSkpIHsKICAgICAgICAgIGluc2VydFJvdyhkc3QsICJtZXNzYWdlcyIsIG0sIGRzdE1zZ0NvbHMpOwogICAgICAgIH0KCiAgICAgICAgZm9yICh2YXIgcWkgb2Ygc3JjCiAgICAgICAgICAucXVlcnkoIlNFTEVDVCAqIEZST00gcXVldWVfaXRlbXMgV0hFUkUgdGhyZWFkX2lkID0gJGlkIikKICAgICAgICAgIC5hbGwoeyAkaWQ6IGlkIH0pKSB7CiAgICAgICAgICB2YXIgc3QgPSBTdHJpbmcocWkuc3RhdGUgfHwgIiIpLnRvTG93ZXJDYXNlKCk7CiAgICAgICAgICBpZiAoc3QgPT09ICJydW5uaW5nIiB8fCBzdCA9PT0gImNsYWltZWQiKSBjb250aW51ZTsgLy8g5LiK5LiA6LSm5Y+355qE6L+Q6KGM5pe25q6L55WZCiAgICAgICAgICBpbnNlcnRSb3coZHN0LCAicXVldWVfaXRlbXMiLCBxaSwgZHN0UXVldWVDb2xzKTsKICAgICAgICB9CgogICAgICAgIGZvciAodmFyIHJjIG9mIHNyYwogICAgICAgICAgLnF1ZXJ5KAogICAgICAgICAgICAiU0VMRUNUICogRlJPTSBhdXRvX3J1bl9kZWNpc2lvbl9yZWNlaXB0cyBXSEVSRSB0aHJlYWRfaWQgPSAkaWQiCiAgICAgICAgICApCiAgICAgICAgICAuYWxsKHsgJGlkOiBpZCB9KSkgewogICAgICAgICAgaW5zZXJ0Um93KGRzdCwgImF1dG9fcnVuX2RlY2lzaW9uX3JlY2VpcHRzIiwgcmMsIGRzdFJlY2VpcHRDb2xzKTsKICAgICAgICB9CgogICAgICAgIGZvciAodmFyIGR2IG9mIHNyYwogICAgICAgICAgLnF1ZXJ5KCJTRUxFQ1QgKiBGUk9NIHRocmVhZF9kZWxpdmVyaWVzIFdIRVJFIHRocmVhZF9pZCA9ICRpZCIpCiAgICAgICAgICAuYWxsKHsgJGlkOiBpZCB9KSkgewogICAgICAgICAgaW5zZXJ0Um93KGRzdCwgInRocmVhZF9kZWxpdmVyaWVzIiwgZHYsIGRzdERlbGl2Q29scyk7CiAgICAgICAgfQogICAgICB9CiAgICB9KSgpOwogIH0gZmluYWxseSB7CiAgICB0cnkgeyBzcmMuY2xvc2UoKTsgfSBjYXRjaCAoZSkgeyB9CiAgICB0cnkgeyBkc3QuY2xvc2UoKTsgfSBjYXRjaCAoZSkgeyB9CiAgfQogIG91dCh7IG9rOiB0cnVlLCBhY3Rpb246ICJtZXJnZSIsIGNvcGllZDogY29waWVkLCBza2lwcGVkOiBza2lwcGVkIH0pOwp9Cgp0cnkgewogIHZhciBtb2RlID0gcHJvY2Vzcy5hcmd2WzJdOwogIGlmIChtb2RlID09PSAibGlzdCIpIHsKICAgIGlmICghcHJvY2Vzcy5hcmd2WzNdKSBkaWUoIue8uuWwkeadpea6kOW6k+i3r+W+hCIpOwogICAgbGlzdFRocmVhZHMocHJvY2Vzcy5hcmd2WzNdKTsKICB9IGVsc2UgaWYgKG1vZGUgPT09ICJtZXJnZSIpIHsKICAgIGlmICghcHJvY2Vzcy5hcmd2WzNdIHx8ICFwcm9jZXNzLmFyZ3ZbNF0pIGRpZSgi57y65bCR5p2l5rqQL+ebruagh+W6k+i3r+W+hCIpOwogICAgbWVyZ2VUaHJlYWRzKAogICAgICBwcm9jZXNzLmFyZ3ZbM10sCiAgICAgIHByb2Nlc3MuYXJndls0XSwKICAgICAgYXJnSnNvbig1LCBbXSksCiAgICAgIGFyZ0pzb24oNiwge30pCiAgICApOwogIH0gZWxzZSB7CiAgICBkaWUoInVua25vd24gbW9kZTogIiArIG1vZGUpOwogIH0KfSBjYXRjaCAoZSkgewogIGRpZShlICYmIGUubWVzc2FnZSA/IGUubWVzc2FnZSA6IFN0cmluZyhlKSk7Cn0K";
+
+        private static string InstanceTitle(int i)
+        {
+            return (i == 0) ? "主实例" : ("实例 " + i);
+        }
+
+        // 实例 i 的 orchestrator 配置根目录（主实例 = …\freebuff-desktop，
+        // 槽位 = …\freebuff-desktop\slots\slot-N）。
+        private static string SlotConfigRoot(int i)
+        {
+            return (i == 0)
+                ? Path.GetDirectoryName(DefaultState)
+                : Path.GetDirectoryName(SlotStatePath(i));
+        }
+
+        // 实例 i 在 projects/ 下第一个工作区的 desktop-v2.db。桌面窗口固定
+        // 用一个工作区，所以取第一个目录即可；没有 = 该实例从没打开过。
+        private static string SlotDbPath(int i)
+        {
+            try
+            {
+                string projects = Path.Combine(SlotConfigRoot(i), "projects");
+                if (!Directory.Exists(projects)) return null;
+                foreach (string dir in Directory.GetDirectories(projects))
+                {
+                    string db = Path.Combine(dir, "desktop-v2.db");
+                    if (File.Exists(db)) return db;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static string FindBunExe()
+        {
+            string p = Path.Combine(
+                Path.GetDirectoryName(FreebuffExe), "resources\\bun\\bun.exe");
+            return File.Exists(p) ? p : null;
+        }
+
+        // 把内嵌脚本落到固定临时路径；内容没变就复用，变了就覆盖。
+        private static string ExtractHandoverScript()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "freebuff-controller");
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, "handover-merge.js");
+            string js = System.Text.Encoding.UTF8.GetString(
+                Convert.FromBase64String(HandoverMergeJsB64));
+            try
+            {
+                if (File.Exists(path) && File.ReadAllText(path) == js) return path;
+            }
+            catch { }
+            File.WriteAllText(path, js, new System.Text.UTF8Encoding(false));
+            return path;
+        }
+
+        // 数据库的时间点副本（连 -wal/-shm 一起），bun 读快照，不碰原库。
+        // 调用方负责删掉整个临时目录。
+        private static string SnapshotDb(int i)
+        {
+            string src = SlotDbPath(i);
+            if (src == null) return null;
+            string dir = Path.Combine(Path.GetTempPath(),
+                "freebuff-controller\\handover-" + i + "-" + DateTime.Now.Ticks);
+            try
+            {
+                Directory.CreateDirectory(dir);
+                string dst = Path.Combine(dir, "desktop-v2.db");
+                foreach (string ext in new string[] { "", "-wal", "-shm" })
+                {
+                    try
+                    {
+                        if (File.Exists(src + ext)) File.Copy(src + ext, dst + ext, true);
+                    }
+                    catch { }
+                }
+                return dst;
+            }
+            catch { return null; }
+        }
+
+        private static string Q(string s)
+        {
+            return "\"" + s + "\"";
+        }
+
+        // 跑一次 bun 脚本，stdout 是一行 JSON。30 秒超时兜底。
+        private static string RunBunJson(string bunExe, string script, string args)
+        {
+            var psi = new ProcessStartInfo(bunExe, Q(script) + " " + args)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding = System.Text.Encoding.UTF8
+            };
+            using (var p = Process.Start(psi))
+            {
+                string stdout = p.StandardOutput.ReadToEnd();
+                string stderr = p.StandardError.ReadToEnd();
+                if (!p.WaitForExit(30000))
+                {
+                    try { p.Kill(); } catch { }
+                    throw new ApplicationException("bun 执行超时");
+                }
+                if (string.IsNullOrWhiteSpace(stdout))
+                    throw new ApplicationException("bun 没有输出" +
+                        (string.IsNullOrEmpty(stderr) ? "" : (": " + stderr.Trim())));
+                return stdout.Trim();
+            }
+        }
+
+        private static string WriteJsonTempFile(object obj)
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "freebuff-controller");
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, "handover-" + Guid.NewGuid().ToString("N") + ".json");
+            File.WriteAllText(path, new JavaScriptSerializer().Serialize(obj),
+                new System.Text.UTF8Encoding(false));
+            return path;
+        }
+
+        // 后台线程等这些实例真正退干净（进程被杀后 WMI 命令行还会残留几秒）。
+        // 返回 true=全部已退出；false=超时仍有实例在跑。
+        private static bool WaitSlotsStopped(int[] slots, int timeoutMs)
+        {
+            int waited = 0;
+            while (waited < timeoutMs)
+            {
+                bool mainRunning;
+                HashSet<int> run = QueryRunning(out mainRunning);
+                bool any = false;
+                foreach (int s in slots)
+                    any |= (s == 0) ? mainRunning : run.Contains(s);
+                if (!any) return true;
+                Thread.Sleep(300);
+                waited += 300;
+            }
+            return false;
+        }
+
+        private void OnHandover()
+        {
+            int target = SelectedIndex();
+            if (target == -999)
+            {
+                Info("请先点击选中要接手的实例行（会话要交给谁继续聊）。");
+                return;
+            }
+            if (ReadTokenFor(target) == null)
+            {
+                Info(InstanceTitle(target) + " 还没登录：请先启动它并用接手的账号登录，再来接力。");
+                return;
+            }
+            if (SlotDbPath(target) == null)
+            {
+                Info(InstanceTitle(target) + " 还没有会话数据库：请先启动一次（不用发消息），再回来接力。");
+                return;
+            }
+            if (FindBunExe() == null)
+            {
+                Info("没有找到 Bun 运行时（Freebuff 安装目录 resources\\bun\\bun.exe），\n会话接力需要它来读写本地会话库。");
+                return;
+            }
+
+            var sources = new List<int>();
+            for (int i = 0; i <= MaxSlot; i++)
+            {
+                if (i == target) continue;
+                if (ReadTokenFor(i) == null) continue;
+                if (SlotDbPath(i) == null) continue;
+                sources.Add(i);
+            }
+            if (sources.Count == 0)
+            {
+                Info("没有可接手的来源：其他实例需要已登录且有聊天记录。");
+                return;
+            }
+
+            // 停之前的运行状态，失败时好把窗口拉回来。
+            bool mainWasRunning;
+            HashSet<int> wasRunning = QueryRunning(out mainWasRunning);
+
+            string targetAcct = AccountForState(
+                (target == 0) ? DefaultState : SlotStatePath(target));
+            List<string> picked;
+            Dictionary<string, string> renames;
+            int sourceIdx;
+            using (var dlg = new HandoverDialog(this, target, sources, targetAcct))
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                picked = dlg.PickedIds;
+                renames = dlg.Renames;
+                sourceIdx = dlg.SourceIndex;
+            }
+            if (picked == null || picked.Count == 0 || sourceIdx < 0) return;
+
+            bool srcRunning = (sourceIdx == 0) ? mainWasRunning : wasRunning.Contains(sourceIdx);
+            bool targetRunning = (target == 0) ? mainWasRunning : wasRunning.Contains(target);
+            if (!Confirm(string.Format(
+                "确定把 {0} 个会话接力到{1}（{2}）继续聊吗？\r\n" +
+                "接力期间两个实例都会短暂停止，完成后自动重新启动。",
+                picked.Count, InstanceTitle(target), targetAcct)))
+                return;
+
+            RunHandoverAsync(sourceIdx, target, picked, renames, srcRunning, targetRunning);
+        }
+
+        // 接力主流程（后台线程）：停两个实例 → 快照来源库 → bun 合并 →
+        // 汇报结果并把相关实例拉起来。失败时把原本在跑的实例拉回来。
+        private void RunHandoverAsync(int src, int target, List<string> ids,
+            Dictionary<string, string> renames, bool srcRunning, bool targetRunning)
+        {
+            SetStatus("会话接力：正在停止相关实例…");
+            string srcKey = (src == 0) ? "main" : src.ToString();
+            string tgtKey = (target == 0) ? "main" : target.ToString();
+            KillInstances(srcKey, tgtKey);
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string error = null;
+                int copied = 0;
+                string snap = null;
+                string idsFile = null;
+                string renFile = null;
+                try
+                {
+                    WaitSlotsStopped(new int[] { src, target }, 15000);
+                    UiSafe(delegate { SetStatus("会话接力：正在快照来源会话库…"); });
+                    snap = SnapshotDb(src);
+                    if (snap == null) throw new ApplicationException("读取来源会话库失败");
+                    idsFile = WriteJsonTempFile(ids);
+                    renFile = WriteJsonTempFile(renames);
+                    string dstDb = SlotDbPath(target);
+                    if (dstDb == null) throw new ApplicationException("目标实例会话库缺失");
+                    UiSafe(delegate { SetStatus("会话接力：正在合并会话…"); });
+                    string json = RunBunJson(FindBunExe(), ExtractHandoverScript(),
+                        "merge " + Q(snap) + " " + Q(dstDb) + " @" + Q(idsFile) + " @" + Q(renFile));
+                    var res = new JavaScriptSerializer()
+                        .Deserialize<Dictionary<string, object>>(json);
+                    if (res == null || !res.ContainsKey("ok") || !Convert.ToBoolean(res["ok"]))
+                        throw new ApplicationException(
+                            (res != null && res.ContainsKey("error"))
+                                ? Convert.ToString(res["error"])
+                                : "合并脚本执行失败");
+                    var copiedList = (res.ContainsKey("copied") ? res["copied"] : null)
+                        as System.Collections.IEnumerable;
+                    if (copiedList != null)
+                    {
+                        int n = 0;
+                        foreach (object x in copiedList) n++;
+                        copied = n;
+                    }
+                }
+                catch (Exception ex) { error = ex.Message; }
+                finally
+                {
+                    if (snap != null) try { Directory.Delete(Path.GetDirectoryName(snap), true); } catch { }
+                    if (idsFile != null) try { File.Delete(idsFile); } catch { }
+                    if (renFile != null) try { File.Delete(renFile); } catch { }
+                }
+
+                string err = error;
+                int copiedFinal = copied;
+                UiSafe(delegate
+                {
+                    if (IsDisposed) return;
+                    if (err != null)
+                    {
+                        SetStatus("会话接力失败：" + err);
+                        Info("会话接力失败：\n" + err);
+                        if (targetRunning)
+                            Delay(600, delegate { if (target == 0) StartMain(); else StartSlot(target, -1); });
+                        if (srcRunning)
+                            Delay(1200, delegate { if (src == 0) StartMain(); else StartSlot(src, -1); });
+                        return;
+                    }
+                    SetStatus("已把 " + copiedFinal + " 个会话接力到" + InstanceTitle(target) + " ✓ 正在启动…");
+                    if (target == 0) StartMain(); else StartSlot(target, -1);
+                    if (srcRunning)
+                        Delay(1500, delegate { if (src == 0) StartMain(); else StartSlot(src, -1); });
+                    FetchQuotasAsync(true);
+                });
+            });
+        }
+
+        // 会话接力选择对话框：选来源实例 → 勾选会话（多选，可改名）→
+        // 确定后交给 OnHandover 完成停实例 / 合并 / 重启。
+        private class HandoverDialog : Form
+        {
+            private readonly MainForm owner;
+            private readonly ComboBox source = new ComboBox();
+            private readonly List<int> sourceIndex = new List<int>();
+            private readonly CheckedListBox threadsBox = new CheckedListBox();
+            private readonly List<string> threadIds = new List<string>();
+            private readonly TextBox renameBox = new TextBox();
+            private readonly Label listState = new Label();
+            private readonly Label summary = new Label();
+            private List<Dictionary<string, object>> loaded;
+            private int loadSeq; // 只在 UI 线程读写，丢弃过期的读取结果
+
+            public List<string> PickedIds;
+            public Dictionary<string, string> Renames;
+            public int SourceIndex = -1;
+
+            public HandoverDialog(MainForm owner, int target, List<int> sources, string targetAcct)
+            {
+                this.owner = owner;
+                Text = "会话接力 → " + InstanceTitle(target);
+                ClientSize = new Size(426, 376);
+                BackColor = ColPanel;
+                ForeColor = ColText;
+                Font = new Font("Microsoft YaHei UI", 9.75f);
+                FormBorderStyle = FormBorderStyle.FixedDialog;
+                MinimizeBox = false;
+                MaximizeBox = false;
+                ShowInTaskbar = false;
+                StartPosition = FormStartPosition.CenterParent;
+
+                var q = new Label();
+                q.AutoSize = false;
+                q.Text = "把来源实例的聊天会话复制给" + InstanceTitle(target) +
+                    "（" + targetAcct + "）继续。\r\n会话内容原样带走，之后用该实例登录的账号接着对话。";
+                q.Bounds = new Rectangle(16, 12, 394, 36);
+                Controls.Add(q);
+
+                var srcLabel = new Label();
+                srcLabel.Text = "从哪接来：";
+                srcLabel.Bounds = new Rectangle(16, 58, 86, 20);
+                Controls.Add(srcLabel);
+
+                source.DropDownStyle = ComboBoxStyle.DropDownList;
+                source.Bounds = new Rectangle(104, 55, 306, 24);
+                source.BackColor = ColNeutral;
+                source.ForeColor = ColText;
+                source.Font = new Font("Microsoft YaHei UI", 9f);
+                foreach (int i in sources)
+                {
+                    string label = InstanceTitle(i);
+                    string acct = AccountForState((i == 0) ? DefaultState : SlotStatePath(i));
+                    if (!acct.StartsWith("(")) label += "（" + acct + "）";
+                    source.Items.Add(label);
+                    sourceIndex.Add(i);
+                }
+                source.SelectedIndexChanged += delegate { LoadFor(CurrentSource()); };
+                if (source.Items.Count > 0) source.SelectedIndex = 0;
+                Controls.Add(source);
+
+                threadsBox.Bounds = new Rectangle(16, 88, 394, 164);
+                threadsBox.CheckOnClick = true;
+                threadsBox.IntegralHeight = false;
+                threadsBox.BorderStyle = BorderStyle.FixedSingle;
+                threadsBox.BackColor = ColRow;
+                threadsBox.ForeColor = ColText;
+                threadsBox.Font = new Font("Microsoft YaHei UI", 9f);
+                threadsBox.ItemCheck += delegate(object s, ItemCheckEventArgs e)
+                {
+                    // ItemCheck 在状态翻转前触发，所以用 e.NewValue 判断。
+                    int n = 0;
+                    int only = -1;
+                    for (int i = 0; i < threadsBox.Items.Count; i++)
+                    {
+                        bool isChecked = (i == e.Index)
+                            ? (e.NewValue == CheckState.Checked)
+                            : threadsBox.GetItemChecked(i);
+                        if (isChecked) { n++; only = i; }
+                    }
+                    summary.Text = "已选 " + n + " / " + threadsBox.Items.Count + " 个会话";
+                    if (n == 1)
+                    {
+                        renameBox.Text = OriginalTitle(only);
+                        renameBox.Enabled = true;
+                    }
+                    else
+                    {
+                        renameBox.Text = "";
+                        renameBox.Enabled = false;
+                    }
+                };
+                Controls.Add(threadsBox);
+                listState.AutoSize = false;
+                listState.Text = "";
+                listState.Bounds = new Rectangle(16, 256, 394, 16);
+                listState.ForeColor = ColSub;
+                listState.Font = new Font("Microsoft YaHei UI", 8.5f);
+                Controls.Add(listState);
+
+                summary.AutoSize = false;
+                summary.Text = "已选 0 个会话";
+                summary.Bounds = new Rectangle(16, 276, 394, 16);
+                summary.ForeColor = ColSub;
+                summary.Font = new Font("Microsoft YaHei UI", 8.5f);
+                Controls.Add(summary);
+
+                var renameLabel = new Label();
+                renameLabel.Text = "改名（可选）：";
+                renameLabel.Bounds = new Rectangle(16, 300, 100, 20);
+                Controls.Add(renameLabel);
+
+                renameBox.Bounds = new Rectangle(120, 298, 290, 24);
+                renameBox.BackColor = ColNeutral;
+                renameBox.ForeColor = ColText;
+                renameBox.Enabled = false;
+                Controls.Add(renameBox);
+
+                Button cancel = MakeButton("取消", 198, ColNeutral, ColNeutralHover);
+                cancel.DialogResult = DialogResult.Cancel;
+                Button ok = MakeButton("开始接力", 310, ColAccent, ColAccentHover);
+                ok.Click += delegate
+                {
+                    var picked = new List<string>();
+                    for (int i = 0; i < threadsBox.Items.Count; i++)
+                    {
+                        if (threadsBox.GetItemChecked(i) && i < threadIds.Count)
+                            picked.Add(threadIds[i]);
+                    }
+                    if (picked.Count == 0)
+                    {
+                        MessageBox.Show(this, "请先勾选要接力的会话。", "会话接力",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return;
+                    }
+                    PickedIds = picked;
+                    SourceIndex = CurrentSource();
+                    Renames = new Dictionary<string, string>();
+                    if (picked.Count == 1 && renameBox.Enabled && renameBox.Text.Trim().Length > 0)
+                    {
+                        string orig = OriginalTitle(threadIds.IndexOf(picked[0]));
+                        if (renameBox.Text.Trim() != orig)
+                            Renames[picked[0]] = renameBox.Text.Trim();
+                    }
+                    DialogResult = DialogResult.OK;
+                };
+                CancelButton = cancel;
+                AcceptButton = ok;
+
+                ScaleUi(this, DpiScale());
+            }
+
+            private int CurrentSource()
+            {
+                return (source.SelectedIndex >= 0 && source.SelectedIndex < sourceIndex.Count)
+                    ? sourceIndex[source.SelectedIndex] : -1;
+            }
+
+            private string OriginalTitle(int idx)
+            {
+                if (loaded == null || idx < 0 || idx >= loaded.Count) return "";
+                string t = DictText(loaded[idx], "title");
+                return t ?? "";
+            }
+
+            private Button MakeButton(string text, int x, Color back, Color hover)
+            {
+                var b = new Button();
+                b.Text = text;
+                b.Bounds = new Rectangle(x, 332, 100, 32);
+                b.FlatStyle = FlatStyle.Flat;
+                b.FlatAppearance.BorderSize = 0;
+                b.FlatAppearance.MouseOverBackColor = hover;
+                b.FlatAppearance.MouseDownBackColor = hover;
+                b.BackColor = back;
+                b.ForeColor = Color.White;
+                b.Cursor = Cursors.Hand;
+                RoundControl(b, 10);
+                Controls.Add(b);
+                return b;
+            }
+
+            private void LoadFor(int inst)
+            {
+                if (inst < 0) return;
+                int seq = ++loadSeq;
+                threadsBox.Items.Clear();
+                threadIds.Clear();
+                loaded = null;
+                renameBox.Text = "";
+                renameBox.Enabled = false;
+                summary.Text = "已选 0 个会话";
+                listState.Text = "正在读取会话…";
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    string snap = null;
+                    try
+                    {
+                        snap = SnapshotDb(inst);
+                        if (snap == null) throw new ApplicationException("没有会话库");
+                        string json = RunBunJson(FindBunExe(), ExtractHandoverScript(),
+                            "list " + Q(snap));
+                        // list 输出是 {"ok":true,"threads":[...]} 包装对象，
+                        // 先解包再取数组（直接反序列化成 List 会得到 null）。
+                        var res = new JavaScriptSerializer()
+                            .Deserialize<Dictionary<string, object>>(json);
+                        var parsed = new List<Dictionary<string, object>>();
+                        if (res != null && res.ContainsKey("threads"))
+                        {
+                            var arr = res["threads"] as System.Collections.IEnumerable;
+                            if (arr != null)
+                            {
+                                foreach (object o in arr)
+                                {
+                                    var d = o as Dictionary<string, object>;
+                                    if (d != null) parsed.Add(d);
+                                }
+                            }
+                        }
+                        if (owner == null || owner.IsDisposed || !owner.IsHandleCreated) return;
+                        try
+                        {
+                            owner.BeginInvoke((MethodInvoker)delegate
+                            {
+                                if (IsDisposed || !IsHandleCreated || loadSeq != seq) return;
+                                Fill(parsed);
+                            });
+                        }
+                        catch { }
+                    }
+                    catch (Exception ex)
+                    {
+                        string msg = ex.Message;
+                        if (owner == null || owner.IsDisposed || !owner.IsHandleCreated) return;
+                        try
+                        {
+                            owner.BeginInvoke((MethodInvoker)delegate
+                            {
+                                if (IsDisposed || !IsHandleCreated || loadSeq != seq) return;
+                                listState.Text = "读取失败：" + msg;
+                            });
+                        }
+                        catch { }
+                    }
+                    finally
+                    {
+                        if (snap != null)
+                            try { Directory.Delete(Path.GetDirectoryName(snap), true); } catch { }
+                    }
+                });
+            }
+
+            private void Fill(List<Dictionary<string, object>> parsed)
+            {
+                listState.Text = "";
+                loaded = parsed ?? new List<Dictionary<string, object>>();
+                threadsBox.BeginUpdate();
+                threadsBox.Items.Clear();
+                threadIds.Clear();
+                foreach (Dictionary<string, object> t in loaded)
+                {
+                    string title = DictText(t, "title");
+                    if (string.IsNullOrEmpty(title)) title = "(未命名会话)";
+                    long msgs = (long)DictNum(t, "messages");
+                    string model = DictText(t, "model");
+                    string status = DictText(t, "status");
+                    string label = title + "　· " + msgs + " 条消息"
+                        + (string.IsNullOrEmpty(model) ? "" : ("　· " + model))
+                        + (status == "closed" ? "　· 已结束" : "　· 进行中");
+                    threadsBox.Items.Add(label, false);
+                    threadIds.Add(DictText(t, "id"));
+                }
+                threadsBox.EndUpdate();
+                if (threadsBox.Items.Count == 0)
+                    listState.Text = "该实例没有可接力的会话";
+            }
+
+            protected override void OnHandleCreated(EventArgs e)
+            {
+                base.OnHandleCreated(e);
+                try
+                {
+                    int on = 1; // DWMWA_USE_IMMERSIVE_DARK_MODE
+                    DwmSetWindowAttribute(Handle, 20, ref on, 4);
+                }
+                catch { }
+            }
         }
 
         private static void StartMain()
@@ -2981,6 +3877,47 @@ namespace FreebuffController
             SetStatus("已停止全部实例，稍候继续…");
             Delay(2000, action);
             return true;
+        }
+
+        // ---- 默认勾选「包含 AGENTS.md」（uiPrefs.injectAgentsMd）--------
+
+        // Freebuff 把「包含 AGENTS.md」开关存在各实例 state.json 的
+        // uiPrefs.injectAgentsMd 里（主实例与每个 slot 各自独立）。它控制
+        // 项目根 AGENTS.md 是否纳入 agent 上下文；语言规则另有家目录
+        // ~/.AGENTS.md 兜底，但项目根那份依赖这个开关。与 EnsureChineseReply
+        // 同思路：每次启动控制器都静默把全部实例的开关确保为 true。
+        internal static void EnsureAgentsMdEnabled()
+        {
+            for (int i = 0; i <= MaxSlot; i++)
+            {
+                string path = (i == 0) ? DefaultState : SlotStatePath(i);
+                try
+                {
+                    if (!File.Exists(path)) continue;
+                    string json = File.ReadAllText(path);
+                    string updated;
+                    if (Regex.IsMatch(json, "\"injectAgentsMd\"\\s*:"))
+                    {
+                        updated = Regex.Replace(json,
+                            "\"injectAgentsMd\"\\s*:\\s*(true|false)",
+                            "\"injectAgentsMd\": true");
+                    }
+                    else
+                    {
+                        Match m = Regex.Match(json, "\"uiPrefs\"\\s*:\\s*\\{");
+                        if (!m.Success) continue; // 没有 uiPrefs 就不动
+                        int brace = m.Index + m.Length - 1;
+                        updated = (brace + 1 < json.Length && json[brace + 1] == '}')
+                            ? json.Substring(0, brace + 1) + "\"injectAgentsMd\": true" +
+                                json.Substring(brace + 1)
+                            : json.Substring(0, brace + 1) + "\"injectAgentsMd\": true, " +
+                                json.Substring(brace + 1);
+                    }
+                    if (updated != json)
+                        File.WriteAllText(path, updated, new System.Text.UTF8Encoding(false));
+                }
+                catch { }
+            }
         }
 
         // ---- 默认回复中文（~\.AGENTS.md）--------------------------------
