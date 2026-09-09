@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.8.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.2.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.2.0")]
 
 namespace FreebuffController
 {
@@ -3704,7 +3704,10 @@ namespace FreebuffController
             }
             bool applied = HanhuaApplied();
             string build = HanhuaBuildDir(hanhuaDir);
-            string tv = HanhuaTargetVersion(hanhuaDir);
+            // Show the version that will actually be applied: output/'s
+            // stamped pack version when present (fetched packs), else the
+            // repo's manifest.json (local builds).
+            string tv = OutputPackVersion(hanhuaDir) ?? HanhuaTargetVersion(hanhuaDir);
             var inst = ParseLooseVersion(installedVersion);
             var target = ParseLooseVersion(tv);
             bool outdated = inst != null && target != null && inst.CompareTo(target) > 0;
@@ -4027,8 +4030,13 @@ namespace FreebuffController
             // strings; let the user back out instead of half-localizing.
             // Re-read first: the classic flow is "controller downloads the
             // update → user installs → clicks 应用汉化 without restarting us".
+            // The verdict must reflect what will actually be installed:
+            // output/ is the single install source and can hold a fetched
+            // pack NEWER than this repo's manifest.json (staging writes
+            // output/ only, never manifest.json), so the stamped pack version
+            // wins; manifest.json is the fallback for unstamped local builds.
             RefreshInstalledVersion();
-            string tv = HanhuaTargetVersion(hanhuaDir);
+            string tv = OutputPackVersion(hanhuaDir) ?? HanhuaTargetVersion(hanhuaDir);
             var inst = ParseLooseVersion(installedVersion);
             var target = ParseLooseVersion(tv);
             if (inst != null && target != null && inst.CompareTo(target) > 0
