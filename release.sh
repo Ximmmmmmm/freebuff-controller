@@ -28,13 +28,23 @@ VER="$(powershell -NoProfile -Command "(Get-Item '${WINHERE}\\FreebuffController
 TAG="v${VER}"
 echo "FreebuffController.exe v${VER} → Release ${TAG}"
 
+# SHA512 digest alongside the exe (sha512sum-style "<hex>  <file>" lines).
+# OnSelfUpdateClick fetches this to verify the download before swapping the
+# running exe; without it the self-update silently skips verification.
+if command -v sha512sum >/dev/null 2>&1; then
+  sha512sum FreebuffController.exe > sha512.txt
+else
+  HEX="$(powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA512 '${WINHERE}\\FreebuffController.exe').Hash.ToLower()" | tr -d '\r')"
+  printf '%s  FreebuffController.exe\n' "$HEX" > sha512.txt
+fi
+
 if gh release view "${TAG}" -R "${REPO}" >/dev/null 2>&1; then
   echo "ERROR: Release ${TAG} 已存在。升 FreebuffController.cs 里的 AssemblyVersion 再发新版，" >&2
   echo "  或先 gh release delete ${TAG} -R ${REPO} --yes。" >&2
   exit 1
 fi
 
-gh release create "${TAG}" "${HERE}/FreebuffController.exe" -R "${REPO}" \
+gh release create "${TAG}" "${HERE}/FreebuffController.exe" "${HERE}/sha512.txt" -R "${REPO}" \
   --title "Freebuff 多开控制器 v${VER}" \
   --notes "单文件 exe（约 56 KB，无运行时依赖），下载即用；多实例独立数据目录 + 独立账号 + 汉化包自动更新 + 代理接入。详见 README。"
 echo "已发布 ${TAG}。"

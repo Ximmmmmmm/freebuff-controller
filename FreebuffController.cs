@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.8.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.1.0")]
 
 namespace FreebuffController
 {
@@ -3438,12 +3438,13 @@ namespace FreebuffController
             ThreadPool.QueueUserWorkItem(delegate
             {
                 Exception error = null;
+                bool shaVerified = false;
                 try
                 {
                     string json = FetchUrlBody(SelfReleasesApiUrl);
                     var rel = json == null ? null : new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
                     object[] assets = rel == null ? null : AsArray(rel["assets"]);
-                    string exeUrl = null, sha512 = null;
+                    string exeUrl = null, shaHex = null;
                     if (assets != null)
                     {
                         foreach (object o in assets)
@@ -3470,7 +3471,7 @@ namespace FreebuffController
                                             int sp = t.IndexOf(' ');
                                             if (sp > 0 && t.Substring(sp).Trim().EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
                                             {
-                                                sha512 = t.Substring(0, sp).Trim().ToLowerInvariant();
+                                                shaHex = t.Substring(0, sp).Trim().ToLowerInvariant();
                                                 break;
                                             }
                                         }
@@ -3482,15 +3483,44 @@ namespace FreebuffController
                     }
                     if (exeUrl == null) throw new ApplicationException("Release 里没有找到 exe 附件");
 
+                    // DownloadOnce expects a base64 digest, sha512.txt carries
+                    // hex. A missing or malformed digest falls back to an
+                    // unverified download, disclosed in the status line once
+                    // the exe is staged (same policy as the app-update path).
+                    string shaB64 = null;
+                    if (shaHex != null && shaHex.Length == 128)
+                    {
+                        try
+                        {
+                            byte[] digest = new byte[64];
+                            for (int i = 0; i < 64; i++)
+                                digest[i] = Convert.ToByte(shaHex.Substring(i * 2, 2), 16);
+                            shaB64 = Convert.ToBase64String(digest);
+                        }
+                        catch { }
+                    }
+
                     string exePath = Application.ExecutablePath;
                     string exeDir = Path.GetDirectoryName(exePath);
                     string exeName = Path.GetFileNameWithoutExtension(exePath);
                     string staged = Path.Combine(exeDir, exeName + ".new-v" + ver + ".exe");
-                    DownloadFirstAvailable(new List<string> { exeUrl }, staged, null, null);
+                    shaVerified = shaB64 != null;
+                    DownloadFirstAvailable(new List<string> { exeUrl }, staged, shaB64, null);
 
                     // Swap script: wait for the parent (this controller) to
-                    // exit, then replace + rename + restart. %~dp0 keeps it
-                    // working regardless of the working directory.
+                    // exit, then replace + restart. move retries for up to a
+                    // minute — AV scanners or a slow file unlock used to make
+                    // a one-shot move fail silently, leaving the user told
+                    // "已下载 ✓" while nothing was replaced. On persistent
+                    // failure a MessageBox (via -EncodedCommand: no codepage
+                    // or quoting hazards in a .cmd) tells the user where the
+                    // staged exe was kept.
+                    string psFail = "Add-Type -AssemblyName System.Windows.Forms; " +
+                        "[System.Windows.Forms.MessageBox]::Show('" +
+                        "控制器自更新替换失败：新版本已保留在 " + staged.Replace("'", "''") +
+                        "，可手动改名替换后使用。')";
+                    string psEncoded = Convert.ToBase64String(
+                        System.Text.Encoding.Unicode.GetBytes(psFail));
                     string script = SelfUpdateScriptPath();
                     File.WriteAllText(script,
                         "@echo off\r\n" +
@@ -3498,7 +3528,16 @@ namespace FreebuffController
                         ":wait\r\n" +
                         "tasklist /fi \"pid eq " + Process.GetCurrentProcess().Id + "\" | find \" " + Process.GetCurrentProcess().Id + " \" >nul 2>nul\r\n" +
                         "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n" +
-                        "move /y \"" + staged + "\" \"" + exePath + "\"\r\n" +
+                        "set /a tries=0\r\n" +
+                        ":move\r\n" +
+                        "move /y \"" + staged + "\" \"" + exePath + "\" >nul 2>nul\r\n" +
+                        "if not errorlevel 1 goto moved\r\n" +
+                        "timeout /t 1 /nobreak >nul\r\n" +
+                        "set /a tries+=1\r\n" +
+                        "if %tries% lss 60 goto move\r\n" +
+                        "start \"\" powershell -NoProfile -WindowStyle Hidden -EncodedCommand " + psEncoded + "\r\n" +
+                        "exit /b 1\r\n" +
+                        ":moved\r\n" +
                         "start \"\" \"" + exePath + "\"\r\n" +
                         "del \"%~f0\"\r\n",
                         new System.Text.UTF8Encoding(false));
@@ -3518,7 +3557,8 @@ namespace FreebuffController
                     if (err == null)
                     {
                         selfDownloaded = true;
-                        SetStatus("控制器 v" + ver + " 已下载 ✓ 关闭本工具后自动替换并重启。");
+                        SetStatus("控制器 v" + ver + " 已下载 ✓ 关闭本工具后自动替换并重启。" +
+                            (shaVerified ? "" : "（未取得有效的 sha512.txt，跳过 SHA512 校验）"));
                     }
                     else
                     {
