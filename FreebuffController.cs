@@ -3329,7 +3329,10 @@ namespace FreebuffController
         // Checks for a newer pack release and stages it into hanhua/output/.
         // Runs on a background thread; at most one check at a time. Stays
         // silent when there is nothing to do (no release published, wrong
-        // target Freebuff version, already staged locally).
+        // target Freebuff version, already staged locally). While a pack is
+        // being fetched, per-stage progress (下载 / 解压 / 暂存) is shown on
+        // the hanhua status label and「应用汉化」stays disabled until
+        // staging finishes.
         private void CheckPackUpdateAsync()
         {
             if (Interlocked.CompareExchange(ref packBusy, 1, 0) != 0) return;
@@ -3345,7 +3348,29 @@ namespace FreebuffController
                 Exception error = null;
                 string packVer = null;
                 string mismatch = null;
-                try { packVer = FetchAndStageLatestPack(dir, instVer, out mismatch); }
+                try
+                {
+                    packVer = FetchAndStageLatestPack(dir, instVer,
+                        delegate(string stage, long done, long total)
+                        {
+                            long d = done, t = total;
+                            UiSafe(delegate
+                            {
+                                if (IsDisposed) return;
+                                if (hanhuaLabel != null)
+                                {
+                                    if (stage == "下载")
+                                        hanhuaLabel.Text = t > 0
+                                            ? "汉化包更新中 · 下载 " + (d * 100 / t) + "%…"
+                                            : "汉化包更新中 · 下载 " + (d >> 20) + " MB…";
+                                    else
+                                        hanhuaLabel.Text = "汉化包更新中 · " + stage + "…";
+                                }
+                                if (btnHanhuaApply != null) btnHanhuaApply.Enabled = false;
+                            });
+                        },
+                        out mismatch);
+                }
                 catch (Exception ex) { error = ex; }
                 Interlocked.Exchange(ref packBusy, 0);
 
@@ -3400,7 +3425,7 @@ namespace FreebuffController
                     if (newv != null && cur != null && newv.CompareTo(cur) > 0)
                     {
                         selfLatestVersion = ver;
-                        if (selfLink != null)
+                        if (selfLink != null && !selfDownloaded)
                         {
                             selfLink.Text = "控制器 v" + ver + " 可更新 · 点击自更新";
                             selfLink.Visible = true;
@@ -3508,7 +3533,19 @@ namespace FreebuffController
                     string exeName = Path.GetFileNameWithoutExtension(exePath);
                     string staged = Path.Combine(exeDir, exeName + ".new-v" + ver + ".exe");
                     shaVerified = shaB64 != null;
-                    DownloadFirstAvailable(new List<string> { exeUrl }, staged, shaB64, null);
+                    DownloadFirstAvailable(new List<string> { exeUrl }, staged, shaB64,
+                        delegate(long done, long total)
+                        {
+                            long d = done, t = total;
+                            UiSafe(delegate
+                            {
+                                if (IsDisposed) return;
+                                if (selfLink == null) return;
+                                selfLink.Text = t > 0
+                                    ? ("自更新下载中 " + (d * 100 / t) + "%…")
+                                    : ("自更新下载中 " + (d >> 20) + " MB…");
+                            });
+                        });
 
                     // Swap script: wait for the parent (this controller) to
                     // exit, then replace + restart. move retries for up to a
@@ -3560,6 +3597,8 @@ namespace FreebuffController
                     if (err == null)
                     {
                         selfDownloaded = true;
+                        if (selfLink != null)
+                            selfLink.Text = "控制器 v" + ver + " 已下载 · 重启生效";
                         SetStatus("控制器 v" + ver + " 已下载 ✓ 关闭本工具后自动替换并重启。" +
                             (shaVerified ? "" : "（未取得有效的 sha512.txt，跳过 SHA512 校验）"));
                     }
@@ -3582,7 +3621,11 @@ namespace FreebuffController
         // newer to stage. mismatch is set when a newer pack exists but its
         // target Freebuff version doesn't match the installed one — the
         // reason nothing was downloaded is user-visible then, not silent.
-        private static string FetchAndStageLatestPack(string hanhuaDir, string installedVersion, out string mismatch)
+        // progress(stage, done, total) reports 下载 byte progress and
+        // one-shot 解压 / 暂存 stage markers as the zip is unpacked and
+        // staged into output/.
+        private static string FetchAndStageLatestPack(string hanhuaDir, string installedVersion,
+                                                      Action<string, long, long> progress, out string mismatch)
         {
             mismatch = null;
             string releaseJson = FetchUrlBody(PackReleasesApiUrl);
@@ -3638,9 +3681,15 @@ namespace FreebuffController
             if (zipUrl == null) return null;
 
             string dest = Path.Combine(Path.GetTempPath(), asset);
-            DownloadFirstAvailable(new List<string> { zipUrl }, dest, sha512, null);
+            if (progress != null) progress("下载", 0, 0);
+            DownloadFirstAvailable(new List<string> { zipUrl }, dest, sha512,
+                delegate(long done, long total)
+                {
+                    if (progress != null) progress("下载", done, total);
+                });
 
             string extractDir = Path.Combine(Path.GetTempPath(), "hanhua-pack-" + packVersion);
+            if (progress != null) progress("解压", 0, 0);
             if (Directory.Exists(extractDir)) Directory.Delete(extractDir, true);
             ExtractZip(dest, extractDir);
             string stagedApp = Path.Combine(extractDir, "app.asar");
@@ -3650,6 +3699,7 @@ namespace FreebuffController
 
             // Stage exactly where 应用汉化 already looks — output/ stays the
             // single install source, local builds and fetched packs alike.
+            if (progress != null) progress("暂存", 0, 0);
             string output = Path.Combine(hanhuaDir, "output");
             Directory.CreateDirectory(output);
             File.Copy(stagedApp, Path.Combine(output, "app.asar"), true);
@@ -3699,6 +3749,9 @@ namespace FreebuffController
         private void RefreshHanhuaUi()
         {
             if (hanhuaLabel == null) return;
+            // 汉化包更新进行中:进度文本由更新回调独占,跳过本轮重写;
+            // 更新完成后 CheckPackUpdateAsync 会再调一次恢复状态。
+            if (Interlocked.CompareExchange(ref packBusy, 0, 0) == 1) return;
             if (Interlocked.CompareExchange(ref hanhuaBusy, 0, 0) == 1)
             {
                 btnHanhuaApply.Enabled = false;
