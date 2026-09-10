@@ -1114,8 +1114,11 @@ namespace FreebuffController
                 var req = (HttpWebRequest)WebRequest.Create(QuotaApiUrl);
                 ApplyProxy(req, proxyCandidate);
                 req.Method = "GET";
-                req.Timeout = 8000;
-                req.ReadWriteTimeout = 8000;
+                // 额度接口实测在服务端繁忙时会要 12~21 秒（2026-09-10 晚间实测，
+                // 同期 codebuff.com 首页 0.66s、更新源 1.09s，纯服务端慢）。原先
+                // 8 秒超时会让所有实例的额度一律超时变「—」，故放宽到 30 秒。
+                req.Timeout = 30000;
+                req.ReadWriteTimeout = 30000;
                 req.Headers["Authorization"] = "Bearer " + token;
                 // v0.0.88+ 的 Freebucks 额度只有带这两个 header 才会返回
                 // （orchestrator 的 refreshTier 同样带这两个头）；
