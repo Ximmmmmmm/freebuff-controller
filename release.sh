@@ -46,5 +46,5 @@ fi
 
 gh release create "${TAG}" "${HERE}/FreebuffController.exe" "${HERE}/sha512.txt" -R "${REPO}" \
   --title "Freebuff 多开控制器 v${VER}" \
-  --notes "单文件 exe（约 56 KB，无运行时依赖），下载即用；多实例独立数据目录 + 独立账号 + 汉化包自动更新 + 代理接入。详见 README。"
+  --notes "单文件 exe（约 140 KB，无运行时依赖），下载即用；多实例独立数据目录 + 独立账号 + 汉化包自动更新 + 代理接入。详见 README。"
 echo "已发布 ${TAG}。"
