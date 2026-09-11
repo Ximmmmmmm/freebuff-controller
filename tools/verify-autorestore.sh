@@ -126,6 +126,6 @@ echo
 if [ "${PASS}" -eq 1 ]; then
   echo "结论：✅ 自动恢复汉化实测通过 —— 汉化在 Freebuff 拉起前被自动换回，英文备份链干净。"
 else
-  echo "结论：❌ 实测未通过（明细见上）。回退办法：控制器里点「应用汉化」，或 cd ${HANHUA} && bash apply.sh"
+  echo "结论：❌ 实测未通过（明细见上）。回退办法：cd ${HANHUA} && bash apply.sh（控制器里的手动按钮已下线）"
   exit 1
 fi

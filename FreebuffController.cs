@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.8.7.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.7.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.8.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.8.0")]
 
 namespace FreebuffController
 {
@@ -184,8 +184,6 @@ namespace FreebuffController
         private const string ChineseReplyMarker = "# 语言规则 / Language Rule";
 
         private Label hanhuaLabel;
-        private Button btnHanhuaApply;
-        private Button btnHanhuaRestore;
         private string hanhuaDir; // located hanhua/ repo; null = not found yet
         // Last Freebuff version the live hanhua status was refreshed against.
         // When it changes (auto-update / reinstall), Freebuff's updater has
@@ -193,17 +191,19 @@ namespace FreebuffController
         // and re-check for a pack right away instead of waiting 30 minutes.
         private string hanhuaRecheckVersion;
         private int hanhuaBusy;
-        // 自动恢复汉化（默认开）：Freebuff 的自动更新会把 app.asar 与 ui/ 换回
-        // 英文原版，开关打开时控制器自己换回中文，用户不必记得点「应用汉化」。
-        // 开关状态存在 hanhua-auto.txt（缺省 = 开）；用户手动「还原英文」会写下
-        // hanhua-english.txt，自动恢复遇到它就停手，免得把用户选的英文又改回中文。
+        // 自动应用汉化（默认开，唯一的开关）：Freebuff 的自动更新会把 app.asar 与
+        // ui/ 换回英文原版，开关打开时控制器自己换回中文；拉到适配本版本的新汉化包
+        // 也直接换上。全程不需要手动操作，状态存 hanhua-auto.txt（缺省 = 开）。
         private CheckBox chkHanhuaAuto;
         private ToolStripMenuItem trayHanhuaAuto;
         private bool autoHanhuaEnabled;
         private static readonly string HanhuaAutoConfigFile = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "FreebuffController\\hanhua-auto.txt");
-        private static readonly string HanhuaEnglishOptOutFile = Path.Combine(
+        // 旧版「还原英文」按钮留下的停手标记。那个按钮已下线（汉化改为全自动），
+        // 这个文件不再参与任何判断——启动时顺手删掉，免得老机器上留着一个再也
+        // 没人认领的开关（它会挡住自动应用，而用户已经没有入口解除它了）。
+        private static readonly string LegacyHanhuaEnglishOptOutFile = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "FreebuffController\\hanhua-english.txt");
 
@@ -249,7 +249,7 @@ namespace FreebuffController
         private void BuildUi()
         {
             Text = "Freebuff 多开控制器 v" + System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
-            ClientSize = new Size(580, 596); // 底部：自动恢复开关 + 清理更新缓存
+            ClientSize = new Size(580, 596); // 底部：汉化状态行 + 自动应用开关 + 缓存状态行
             BackColor = ColBg;
             ForeColor = ColText;
             Font = new Font("Microsoft YaHei UI", 9.75f);
@@ -310,24 +310,21 @@ namespace FreebuffController
             Button btnRefresh = MakeButton("刷新", 475, 436, 82, ColNeutral, ColNeutralHover);
             btnRefresh.Click += delegate { SetStatus("正在刷新…"); RefreshGrid(); FetchQuotasAsync(true); };
 
+            // 汉化状态一行显示。这里没有按钮了：应用与还原都不再需要手动触发，
+            // 换文件由 StartAutoRestoreHanhua 在三个时机自动完成。
             hanhuaLabel = new Label();
             hanhuaLabel.AutoSize = false;
-            hanhuaLabel.Bounds = new Rectangle(22, 494, 324, 16);
+            hanhuaLabel.Bounds = new Rectangle(22, 494, 534, 16);
             hanhuaLabel.ForeColor = ColSub;
             hanhuaLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
             Controls.Add(hanhuaLabel);
 
-            btnHanhuaApply = MakeButton("应用汉化", 354, 484, 100, ColNeutral, ColNeutralHover);
-            btnHanhuaApply.Click += delegate { OnHanhuaApply(); };
-
-            btnHanhuaRestore = MakeButton("还原英文", 460, 484, 100, ColNeutral, ColNeutralHover);
-            btnHanhuaRestore.Click += delegate { OnHanhuaRestore(); };
-
-            // 自动恢复开关：Freebuff 自更新把汉化覆盖掉之后，启动实例前自动换回
-            // 中文。默认勾选；取消勾选就完全交回手动（历史行为）。
+            // 自动应用开关：Freebuff 自更新把汉化覆盖掉之后，启动实例前自动换回
+            // 中文；拉到适配本版本的新汉化包也直接换上。默认勾选；取消勾选就完全
+            // 停下（那时没有手动按钮兜底，重新勾选即可恢复）。
             chkHanhuaAuto = new CheckBox();
             chkHanhuaAuto.AutoSize = false;
-            chkHanhuaAuto.Text = "更新后自动恢复汉化（启动 Freebuff 前）";
+            chkHanhuaAuto.Text = "自动应用汉化（更新后 / 启动 Freebuff 前）";
             chkHanhuaAuto.Bounds = new Rectangle(22, 520, 340, 20);
             chkHanhuaAuto.ForeColor = ColSub;
             chkHanhuaAuto.BackColor = ColBg;
@@ -569,7 +566,7 @@ namespace FreebuffController
             var menu = new ContextMenuStrip();
             menu.Items.Add("打开", null, delegate { ShowUp(); });
             // 托盘里也放一份开关：控制器多数时间缩在托盘，窗口底部那行看不到。
-            trayHanhuaAuto = new ToolStripMenuItem("更新后自动恢复汉化");
+            trayHanhuaAuto = new ToolStripMenuItem("自动应用汉化");
             trayHanhuaAuto.CheckOnClick = true;
             trayHanhuaAuto.Checked = autoHanhuaEnabled;
             trayHanhuaAuto.Click += delegate { SetHanhuaAuto(trayHanhuaAuto.Checked); };
@@ -1325,7 +1322,7 @@ namespace FreebuffController
             RefreshHanhuaLive();
         }
 
-        // Keep the hanhua status / 应用汉化 button in step with the installed
+        // Keep the hanhua status line in step with the installed
         // Freebuff version. Freebuff's auto-updater replaces the localized
         // app.asar and ui/ with the English originals, so once the installed
         // version changes the on-screen status can lag the real disk state
@@ -1346,6 +1343,7 @@ namespace FreebuffController
                 RefreshHanhuaUi();
                 RefreshCacheLink();   // 自动更新刚落地：缓存里多了一份新安装包
                 PruneDownloadedInstaller(); // 同理，我们下的那份安装包也该删了
+                AutoCleanUpdaterCache("检测到 Freebuff 更新"); // 官方更新器攒下的旧包一起收拾
                 CheckPackUpdateAsync();
                 // 装机版本变了：多半是自动更新刚把汉化覆盖掉。开关打开时立刻恢复，
                 // 不等用户发现界面变回英文再点按钮。
@@ -1480,7 +1478,7 @@ namespace FreebuffController
                         if (UpdateAvailable() && !updateStarted)
                         {
                             string after = (HanhuaApplied() && HanhuaBuildDir(hanhuaDir) != null)
-                                ? " 更新会覆盖汉化，装完点“应用汉化”恢复中文。"
+                                ? " 更新会覆盖汉化，启动 Freebuff 前会自动换回中文。"
                                 : "";
                             SetStatus("Freebuff 发布了新版本 v" + latestVersion +
                                 "，点击右下角“点击更新”直接下载安装。" + after);
@@ -1505,7 +1503,7 @@ namespace FreebuffController
             if (updateStarted)
             {
                 versionLink.Text = (HanhuaBuildDir(hanhuaDir) != null)
-                    ? "安装包已启动 · 装完点“应用汉化”"
+                    ? "安装包已启动 · 装完后启动时会自动换回中文"
                     : "安装包已启动 · 按提示完成安装";
                 versionLink.ForeColor = ColSub;
                 return;
@@ -1938,6 +1936,13 @@ namespace FreebuffController
             Delay(600, CheckShareOnStartup);
             // 备份整理放到共享检查之后（那个可能弹模态框），别互相抢 UI。
             Delay(1500, PruneHanhuaBackupsOnStartup);
+            // 启动时也把更新缓存收一遍、并清掉旧版「还原英文」留下的停手标记。
+            // 两个都只报一句状态、不弹窗，所以放在最后。
+            Delay(2200, delegate
+            {
+                RemoveLegacyEnglishOptOut();
+                AutoCleanUpdaterCache("启动时");
+            });
         }
 
         private void LaunchIndex(int rowIndex)
@@ -2989,7 +2994,7 @@ namespace FreebuffController
         // The pack is distributed as a GitHub Release: a zip of output/ plus
         // a pack-manifest.json asset (packVersion / targetVersion / asset /
         // sha512). The check mirrors the Freebuff update flow — fetch, verify
-        // SHA512, stage into hanhua/output/ — and the existing「应用汉化」
+        // SHA512, stage into hanhua/output/ — and StartAutoRestoreHanhua then
         // button installs it; nothing is applied while Freebuff may be
         // running, and publishing a release stays a manual decision.
 
@@ -3072,8 +3077,7 @@ namespace FreebuffController
         // silent when there is nothing to do (no release published, wrong
         // target Freebuff version, already staged locally). While a pack is
         // being fetched, per-stage progress (下载 / 解压 / 暂存) is shown on
-        // the hanhua status label and「应用汉化」stays disabled until
-        // staging finishes.
+        // the hanhua status label until staging finishes.
         private void CheckPackUpdateAsync()
         {
             if (Interlocked.CompareExchange(ref packBusy, 1, 0) != 0) return;
@@ -3107,7 +3111,6 @@ namespace FreebuffController
                                     else
                                         hanhuaLabel.Text = "汉化包更新中 · " + stage + "…";
                                 }
-                                if (btnHanhuaApply != null) btnHanhuaApply.Enabled = false;
                             });
                         },
                         out mismatch);
@@ -3125,7 +3128,7 @@ namespace FreebuffController
                     {
                         // 自动应用可能正被上一轮触发、正在换文件：别抢它的状态栏文案。
                         if (Interlocked.CompareExchange(ref hanhuaBusy, 0, 0) == 0)
-                            SetStatus("汉化包 v" + ver + " 已就绪 · 点「应用汉化」生效。");
+                            SetStatus("汉化包 v" + ver + " 已就绪 · 自动应用待命。");
                         // 刚拉到适配本版本的包：装机是英文（更新刚覆盖过）就接着自动恢复，
                         // 装机是旧版汉化（同版本修正重发）就直接升级，都不必点按钮。
                         StartAutoRestoreHanhua("汉化包已就绪", null);
@@ -3445,7 +3448,7 @@ namespace FreebuffController
             if (!File.Exists(stagedApp) || !Directory.Exists(stagedUi))
                 throw new ApplicationException("汉化包内容不完整（缺 app.asar 或 ui/）");
 
-            // Stage exactly where 应用汉化 already looks — output/ stays the
+            // Stage exactly where auto-apply already looks — output/ stays the
             // single install source, local builds and fetched packs alike.
             if (progress != null) progress("暂存", 0, 0);
             string output = Path.Combine(hanhuaDir, "output");
@@ -3500,12 +3503,7 @@ namespace FreebuffController
             // 汉化包更新进行中:进度文本由更新回调独占,跳过本轮重写;
             // 更新完成后 CheckPackUpdateAsync 会再调一次恢复状态。
             if (Interlocked.CompareExchange(ref packBusy, 0, 0) == 1) return;
-            if (Interlocked.CompareExchange(ref hanhuaBusy, 0, 0) == 1)
-            {
-                btnHanhuaApply.Enabled = false;
-                btnHanhuaRestore.Enabled = false;
-                return;
-            }
+            if (Interlocked.CompareExchange(ref hanhuaBusy, 0, 0) == 1) return;
             bool applied = HanhuaApplied();
             string build = HanhuaBuildDir(hanhuaDir);
             // Show the version that will actually be applied: output/'s
@@ -3517,31 +3515,22 @@ namespace FreebuffController
             bool outdated = inst != null && target != null && inst.CompareTo(target) > 0;
             string tag = (tv == null) ? "" : "（词典 v" + tv + (outdated ? "，已过时" : "") + "）";
 
-            // A staged pack newer than the installed stamp means「应用汉化」
-            // has something to install even though hanhua is already applied
-            // (built locally, or fetched by CheckPackUpdateAsync).
+            // output/ 里待应用的那份包比装机的版本戳新（本地刚构建，或刚被
+            // CheckPackUpdateAsync 暂存进来）——StartAutoRestoreHanhua 会把它换上。
             string outPack = OutputPackVersion(hanhuaDir);
             bool newerPack = build != null && PendingPackIsNewer();
 
             if (applied)
                 hanhuaLabel.Text = newerPack
-                    ? ("汉化：已应用 · 有新包 v" + outPack + " 可应用")
+                    ? ("汉化：已应用 · 有新包 v" + outPack + "，自动应用待命")
                     : ((build != null) ? ("汉化：已应用" + tag) : "汉化：已应用");
             else if (build != null)
-                hanhuaLabel.Text = "汉化：未应用 · 可一键应用" + tag;
+                hanhuaLabel.Text = "汉化：未应用 · 自动应用待命" + tag;
             else if (hanhuaDir != null)
                 hanhuaLabel.Text = "汉化：未应用 · 缺少构建（先运行 build.sh）";
             else
-                hanhuaLabel.Text = "汉化：未应用 · 未找到仓库（点「应用汉化」定位）";
+                hanhuaLabel.Text = "汉化：未应用 · 未找到仓库（freebuff-zh / hanhua/）";
             hanhuaLabel.ForeColor = ((!applied && build != null) || newerPack) ? ColGreen : ColSub;
-            // "应用汉化" applies while the app is English (never applied, or
-            // Freebuff's auto-update reverted it) and when a newer pack is
-            // staged in output/ than what is installed. Otherwise there is
-            // nothing to do — leave it disabled, exactly like 还原英文 before
-            // any backup exists. Repo-not-found keeps it clickable so
-            // OnHanhuaApply can pop the folder picker.
-            btnHanhuaApply.Enabled = (!applied || newerPack) && (build != null || hanhuaDir == null);
-            btnHanhuaRestore.Enabled = applied && LatestHanhuaBackup() != null;
         }
 
         // exe-adjacent probes → config (the order the README documents). A
@@ -3571,26 +3560,6 @@ namespace FreebuffController
             return null;
         }
 
-        // Ask once and remember; apply/restore are useless without the repo.
-        private bool TryResolveHanhuaDir()
-        {
-            if (IsValidHanhuaDir(hanhuaDir)) return true;
-            using (var dlg = new FolderBrowserDialog())
-            {
-                dlg.Description = "选择工具包里的 hanhua 目录（含 dict.json 与 output/）";
-                dlg.ShowNewFolderButton = false;
-                if (dlg.ShowDialog(this) != DialogResult.OK) return false;
-                if (!IsValidHanhuaDir(dlg.SelectedPath))
-                {
-                    Info("所选目录不是汉化仓库（缺少 dict.json）。");
-                    return false;
-                }
-                hanhuaDir = dlg.SelectedPath;
-                SaveHanhuaConfig(hanhuaDir);
-                return true;
-            }
-        }
-
         private static string ReadHanhuaConfig()
         {
             try
@@ -3600,16 +3569,6 @@ namespace FreebuffController
                 return (p.Length > 0) ? p : null;
             }
             catch { return null; }
-        }
-
-        private static void SaveHanhuaConfig(string dir)
-        {
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(HanhuaConfigFile));
-                File.WriteAllText(HanhuaConfigFile, dir);
-            }
-            catch { }
         }
 
         private static bool ReadHanhuaAutoEnabled()
@@ -3633,26 +3592,6 @@ namespace FreebuffController
             catch { }
         }
 
-        private static bool HanhuaEnglishOptOut()
-        {
-            try { return File.Exists(HanhuaEnglishOptOutFile); } catch { return false; }
-        }
-
-        private static void SetHanhuaEnglishOptOut(bool on)
-        {
-            try
-            {
-                if (on)
-                {
-                    Directory.CreateDirectory(Path.GetDirectoryName(HanhuaEnglishOptOutFile));
-                    File.WriteAllText(HanhuaEnglishOptOutFile, "1");
-                }
-                else if (File.Exists(HanhuaEnglishOptOutFile))
-                    File.Delete(HanhuaEnglishOptOutFile);
-            }
-            catch { }
-        }
-
         // 勾选框与托盘菜单项共用：两边任一被点都走这里，状态不会漂移。
         private void SetHanhuaAuto(bool on)
         {
@@ -3661,8 +3600,8 @@ namespace FreebuffController
             if (trayHanhuaAuto != null && trayHanhuaAuto.Checked != on) trayHanhuaAuto.Checked = on;
             SaveHanhuaAutoEnabled(on);
             SetStatus(on
-                ? "已开启自动恢复汉化：更新覆盖后启动 Freebuff 前自动换回中文。"
-                : "已关闭自动恢复汉化：更新覆盖后请手动点「应用汉化」。");
+                ? "已开启自动应用汉化：更新覆盖后、启动 Freebuff 前自动换回中文。"
+                : "已关闭自动应用汉化：Freebuff 更新覆盖后不会再换回中文（重新勾选即恢复）。");
             RefreshHanhuaUi();
         }
 
@@ -3707,22 +3646,6 @@ namespace FreebuffController
             catch { return false; }
         }
 
-        // Timestamped names sort lexicographically; newest backup wins.
-        // Only complete backups (app.asar + ui/index.html) qualify — restoring
-        // from a half-written one would leave asar and ui out of sync.
-        private static string LatestHanhuaBackup()
-        {
-            try
-            {
-                if (!Directory.Exists(FreebuffResources)) return null;
-                string best = null;
-                foreach (string d in Directory.GetDirectories(FreebuffResources, "hanhua-backup-*"))
-                    if (IsCompleteBackup(d) && (best == null || string.CompareOrdinal(d, best) > 0)) best = d;
-                return best;
-            }
-            catch { return null; }
-        }
-
         private static string HanhuaErrorText(Exception ex)
         {
             if (ex is IOException || ex is UnauthorizedAccessException)
@@ -3751,28 +3674,6 @@ namespace FreebuffController
             string dst = Path.Combine(FreebuffResources, "orchestrator\\ui");
             if (Directory.Exists(dst)) Directory.Delete(dst, true);
             CopyDir(srcUi, dst);
-        }
-
-        // Common preflight for apply/restore: Freebuff must not hold the
-        // files open. Offers to stop everything first; false = user canceled.
-        private bool ConfirmStopAllThenRun(Action action)
-        {
-            bool mainRunning;
-            HashSet<int> slots = QueryRunning(out mainRunning);
-            if (!mainRunning && slots.Count == 0)
-            {
-                action();
-                return true;
-            }
-            if (!Confirm("检测到 Freebuff 正在运行，替换文件可能失败。\r\n先停止全部实例再继续吗？"))
-                return false;
-            string[] all = new string[MaxSlot + 1];
-            all[0] = "main";
-            for (int i = 1; i <= MaxSlot; i++) all[i] = i.ToString();
-            KillInstances(all);
-            SetStatus("已停止全部实例，稍候继续…");
-            Delay(2000, action);
-            return true;
         }
 
         // ---- 默认勾选「包含 AGENTS.md」（uiPrefs.injectAgentsMd）--------
@@ -3882,76 +3783,6 @@ namespace FreebuffController
             }
         }
 
-        private void OnHanhuaApply()
-        {
-            if (Interlocked.CompareExchange(ref hanhuaBusy, 1, 0) != 0) return;
-            if (!TryResolveHanhuaDir()) { Interlocked.Exchange(ref hanhuaBusy, 0); return; }
-            string build = HanhuaBuildDir(hanhuaDir);
-            if (build == null)
-            {
-                Interlocked.Exchange(ref hanhuaBusy, 0);
-                Info("汉化仓库里缺少构建产物 output\\app.asar。\r\n请先在仓库目录运行：bash build.sh");
-                RefreshHanhuaUi();
-                return;
-            }
-            // Dict older than the installed app → the build likely misses new
-            // strings; let the user back out instead of half-localizing.
-            // Re-read first: the classic flow is "controller downloads the
-            // update → user installs → clicks 应用汉化 without restarting us".
-            // The verdict must reflect what will actually be installed:
-            // output/ is the single install source and can hold a fetched
-            // pack NEWER than this repo's manifest.json (staging writes
-            // output/ only, never manifest.json), so the stamped pack version
-            // wins; manifest.json is the fallback for unstamped local builds.
-            RefreshInstalledVersion();
-            string tv = OutputPackVersion(hanhuaDir) ?? HanhuaTargetVersion(hanhuaDir);
-            var inst = ParseLooseVersion(installedVersion);
-            var target = ParseLooseVersion(tv);
-            if (inst != null && target != null && inst.CompareTo(target) > 0
-                && !Confirm("当前 Freebuff v" + installedVersion + " 比词典适配的 v" + tv +
-                    " 新，现有构建可能缺少新版本的新增文案。\r\n建议先更新词典并重新构建。仍要继续应用吗？"))
-            {
-                Interlocked.Exchange(ref hanhuaBusy, 0);
-                return;
-            }
-            if (!ConfirmStopAllThenRun(delegate { ApplyHanhuaBuild(build); }))
-                Interlocked.Exchange(ref hanhuaBusy, 0);
-        }
-
-        // Runs on the UI thread (possibly via Delay), does the file work on
-        // a worker: back up the pristine English files once, then copy over —
-        // the same flow as hanhua's apply.sh.
-        private void ApplyHanhuaBuild(string build)
-        {
-            SetStatus("正在应用汉化…");
-            ThreadPool.QueueUserWorkItem(delegate
-            {
-                Exception error = null;
-                string pruneNote = null;
-                try
-                {
-                    pruneNote = BackupPristineIfNeeded();
-                    File.Copy(Path.Combine(build, "app.asar"),
-                        Path.Combine(FreebuffResources, "app.asar"), true);
-                    ReplaceUiDir(Path.Combine(build, "ui"));
-                    // 手动应用 = 用户要中文：解除之前「还原英文」留下的停手标记。
-                    SetHanhuaEnglishOptOut(false);
-                }
-                catch (Exception ex) { error = ex; }
-                Interlocked.Exchange(ref hanhuaBusy, 0);
-                UiSafe(delegate
-                {
-                    if (IsDisposed) return;
-                    SetStatus(error == null
-                        ? "汉化已应用 ✓ 重启 Freebuff 生效。"
-                        : "应用汉化失败：" + HanhuaErrorText(error));
-                    ShowStatusAfterIdle(error == null ? pruneNote : null);
-                    RefreshHanhuaUi();
-                    DrainHanhuaWaiters();
-                });
-            });
-        }
-
         // 换文件前给英文原版留一份快照，然后顺手执行保留策略；返回可展示的清理
         // 说明（没清理 = null）。两件事写在一个函数里：备份是「回退的原料」，清理
         // 是「别让原料无限堆积」，拆开容易被以后改动漏掉一半。
@@ -3969,8 +3800,7 @@ namespace FreebuffController
         }
 
         // 只保留最近 keep 份「完整」备份，其余（更旧的、以及半截的）删除；返回清理
-        // 说明（没清 = null）。排序按目录名（yyyyMMdd-HHmmss）= 时间，与
-        // LatestHanhuaBackup 同一套规则。删除失败（被占用 / 无权限）就留着下次再试：
+        // 说明（没清 = null）。排序按目录名（yyyyMMdd-HHmmss）= 时间。删除失败（被占用 / 无权限）就留着下次再试：
         // 清理从来不该影响应用或恢复本身。
         private static string PruneHanhuaBackups(int keep)
         {
@@ -4002,8 +3832,7 @@ namespace FreebuffController
         }
 
         // 半截的备份不留：只写了 app.asar 没写完 ui/ 的那种，还原过去会让 asar 与
-        // ui 版本对不上。LatestHanhuaBackup 也只认完整的，所以清掉它们不会让
-        // 「还原英文」少一个可选项。
+        // ui 版本对不上；而且已经没有「挑一份备份还原」的入口了，留着只是占地。
         private static bool IsCompleteBackup(string dir)
         {
             return File.Exists(Path.Combine(dir, "app.asar"))
@@ -4031,53 +3860,6 @@ namespace FreebuffController
             if (bytes >= 1048576L) return (bytes / 1048576.0).ToString("0.0") + " MB";
             if (bytes >= 1024L) return (bytes / 1024.0).ToString("0.0") + " KB";
             return bytes + " B";
-        }
-
-        private void OnHanhuaRestore()
-        {
-            if (Interlocked.CompareExchange(ref hanhuaBusy, 1, 0) != 0) return;
-            string bk = LatestHanhuaBackup();
-            if (bk == null)
-            {
-                Interlocked.Exchange(ref hanhuaBusy, 0);
-                Info("没有找到英文原版备份（resources\\hanhua-backup-*）。\r\n应用汉化时会自动创建。");
-                return;
-            }
-            if (!ConfirmStopAllThenRun(delegate { RestoreHanhuaBackup(bk); }))
-                Interlocked.Exchange(ref hanhuaBusy, 0);
-        }
-
-        private void RestoreHanhuaBackup(string bk)
-        {
-            SetStatus("正在还原英文原版…");
-            ThreadPool.QueueUserWorkItem(delegate
-            {
-                Exception error = null;
-                try
-                {
-                    File.Copy(Path.Combine(bk, "app.asar"),
-                        Path.Combine(FreebuffResources, "app.asar"), true);
-                    ReplaceUiDir(Path.Combine(bk, "ui"));
-                    // 用户主动选英文：记一笔，自动恢复从此停手，直到他再点「应用汉化」。
-                    SetHanhuaEnglishOptOut(true);
-                }
-                catch (Exception ex) { error = ex; }
-                Interlocked.Exchange(ref hanhuaBusy, 0);
-                UiSafe(delegate
-                {
-                    if (IsDisposed) return;
-                    // 用户主动选英文：自动恢复停手（下次得点「应用汉化」才会再换），
-                    // 状态栏把这件事说清楚，避免他以为开关坏了。
-                    if (error != null)
-                        SetStatus("还原失败：" + HanhuaErrorText(error));
-                    else if (autoHanhuaEnabled)
-                        SetStatus("已还原英文原版 ✓ 自动恢复已暂停（点「应用汉化」恢复中文）");
-                    else
-                        SetStatus("已还原英文原版 ✓ 重启 Freebuff 生效。");
-                    RefreshHanhuaUi();
-                    DrainHanhuaWaiters();
-                });
-            });
         }
 
         // ---------- 自动恢复汉化 ----------
@@ -4127,7 +3909,7 @@ namespace FreebuffController
                 {
                     if (IsDisposed) return;
                     if (note != null) SetStatus(note);
-                    RefreshHanhuaUi();   // 期间被置灰的两个按钮要恢复
+                    RefreshHanhuaUi();   // 换文件期间暂停的状态显示要恢复
                     DrainHanhuaWaiters();
                 });
             });
@@ -4138,17 +3920,16 @@ namespace FreebuffController
         // 进程；其余调用传 null）。
         //
         // 只在「确定该换、也能安全换」时动手，其余一律放行给现有流程：
-        //   · 开关关着 / 用户手动选过英文 → 不介入；
+        //   · 开关关着 → 不介入（没有手动按钮兜底，重新勾选即可恢复）；
         //   · 装机已是汉化版且 output/ 里没有更新的包 → 没什么可换；有更新的包
         //     （同一 Freebuff 版本的修正重发 v0.0.103.1 这类）就自动换上，不等点击；
         //   · 正在应用或正在下载汉化包 → 让现有流程跑完；
-        //   · 找不到汉化仓库 / output/ 里没有构建 → 静默跳过（用户点按钮时才弹目录选择）；
+        //   · 找不到汉化仓库 / output/ 里没有构建 → 静默跳过（要动手得自己构建）；
         //   · 构建的 targetVersion 与装机版本对不上 → 装了会引用不存在的 bundle，跳过；
         //   · 有实例正在运行 → 不抢文件（换文件会打断任务），等下次触发。
         private bool StartAutoRestoreHanhua(string why, Action onDone)
         {
             if (!autoHanhuaEnabled) return false;
-            if (HanhuaEnglishOptOut()) return false;
             // 装机是英文（Freebuff 更新刚覆盖过）→ 恢复；装机已是中文但 output/ 里
             // 有更新的包 → 升级换上。两者都不成立就不必介入。
             bool wasApplied = HanhuaApplied();
@@ -4199,7 +3980,7 @@ namespace FreebuffController
                             ? "已自动应用新汉化包 ✓ 下次打开 Freebuff 就是新版中文。"
                             : "已自动恢复汉化 ✓ 下次打开 Freebuff 就是中文。")
                         : (wasApplied ? "自动应用汉化包失败：" : "自动恢复汉化失败：")
-                          + HanhuaErrorText(error) + "（可点「应用汉化」重试）");
+                          + HanhuaErrorText(error) + "（下次启动 Freebuff 时会再试）");
                     ShowStatusAfterIdle(error == null ? pruneNote : null);
                     RefreshHanhuaUi();
                     if (onDone != null) onDone();
@@ -4293,8 +4074,8 @@ namespace FreebuffController
             catch { return 0; }
         }
 
-        // 链接文案就是「点一下能释放多少」；没有可清理的就如实说整个缓存多大，
-        // 点击仍然有反馈（弹窗告知目录在哪、为什么剩下的不能删）。
+        // 状态行：清理已经自动化（启动时 + 检测到 Freebuff 更新后各一次），这里只
+        // 如实报告现在占多少、有没有等到下一轮才会清的。点击仍保留为手动兜底。
         private void RefreshCacheLink()
         {
             if (cacheLink == null) return;
@@ -4302,10 +4083,10 @@ namespace FreebuffController
             long reclaimable, total;
             ScanUpdaterCache(out doomed, out reclaimable, out total);
             cacheLink.Text = reclaimable > 0
-                ? "清理更新缓存（可释放 " + HumanSize(reclaimable) + "）"
+                ? "更新缓存 " + HumanSize(total) + " · 待自动清理"
                 : (total > 0
-                    ? "更新缓存 " + HumanSize(total) + " · 无需清理"
-                    : "清理更新缓存");
+                    ? "更新缓存 " + HumanSize(total) + " · 无可自动清理"
+                    : "更新缓存 · 空");
         }
 
         private void OnCleanUpdaterCache()
@@ -4351,6 +4132,59 @@ namespace FreebuffController
                     RefreshCacheLink();
                 });
             });
+        }
+
+        // 自动清理：启动后与检测到 Freebuff 版本变化后各跑一次。判定规则与手动入口
+        // 完全一致——只删版本不高于已装版本的安装包，以及跟着它们一起作废的
+        // update-info.json / blockmap，绝不碰比已装版本新的 pending/ 包与根目录的
+        // current.blockmap。既然不可能删掉「等着安装的那一份」，就不弹确认框；
+        // 有东西可清才报一句，没得清就只刷新状态行。
+        private void AutoCleanUpdaterCache(string why)
+        {
+            RefreshInstalledVersion(); // 按最新装机版本判定哪个包还用得上
+            List<string> doomed;
+            long reclaimable, total;
+            ScanUpdaterCache(out doomed, out reclaimable, out total);
+            if (doomed.Count == 0)
+            {
+                RefreshCacheLink();
+                return;
+            }
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                long freed = 0;
+                int failed = 0;
+                foreach (string f in doomed)
+                {
+                    long len = FileLength(f);
+                    try
+                    {
+                        File.Delete(f);
+                        freed += len;
+                    }
+                    catch { failed++; } // 占用中（更新器正在写）：留给下次
+                }
+                RemoveEmptyUpdaterDirs();
+                UiSafe(delegate
+                {
+                    if (IsDisposed) return;
+                    SetStatus(failed == 0
+                        ? "已自动清理更新缓存 ✓ 释放 " + HumanSize(freed) + "（" + why + "）"
+                        : "已自动清理更新缓存 " + HumanSize(freed) + "（" + failed + " 个文件被占用）");
+                    RefreshCacheLink();
+                });
+            });
+        }
+
+        // 旧版「还原英文」按钮留下的停手标记：按钮已下线、判断也删掉了，它现在唯一
+        // 的作用是让老用户以为自动应用被永久停住（而他已经没有入口解除）。启动时清掉。
+        private static void RemoveLegacyEnglishOptOut()
+        {
+            try
+            {
+                if (File.Exists(LegacyHanhuaEnglishOptOutFile)) File.Delete(LegacyHanhuaEnglishOptOutFile);
+            }
+            catch { }
         }
 
         // pending/ 空了就顺手去掉，只删空目录，缓存根目录永远保留。
