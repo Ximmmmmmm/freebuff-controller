@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.8.8.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.8.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.9.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.9.0")]
 
 namespace FreebuffController
 {
@@ -151,7 +151,6 @@ namespace FreebuffController
         private static readonly Color ColNewVersion = Color.FromArgb(245, 185, 66);
 
         private Label versionLink;
-        private Label cacheLink;     // 底部「清理更新缓存」入口
         private Label selfLink;      // "自更新" entry, top-right; visible when self-update pending
         private string installedVersion;
         private string latestVersion; // null until a check succeeds; null also = failed
@@ -249,7 +248,7 @@ namespace FreebuffController
         private void BuildUi()
         {
             Text = "Freebuff 多开控制器 v" + System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
-            ClientSize = new Size(580, 596); // 底部：汉化状态行 + 自动应用开关 + 缓存状态行
+            ClientSize = new Size(580, 576); // 底部三行：状态+版本 / 开关 / 动态提示
             BackColor = ColBg;
             ForeColor = ColText;
             Font = new Font("Microsoft YaHei UI", 9.75f);
@@ -310,11 +309,10 @@ namespace FreebuffController
             Button btnRefresh = MakeButton("刷新", 475, 436, 82, ColNeutral, ColNeutralHover);
             btnRefresh.Click += delegate { SetStatus("正在刷新…"); RefreshGrid(); FetchQuotasAsync(true); };
 
-            // 汉化状态一行显示。这里没有按钮了：应用与还原都不再需要手动触发，
-            // 换文件由 StartAutoRestoreHanhua 在三个时机自动完成。
+            // 汉化状态与 Freebuff 版本并排一行（版本靠右），下面只剩开关和动态提示。
             hanhuaLabel = new Label();
             hanhuaLabel.AutoSize = false;
-            hanhuaLabel.Bounds = new Rectangle(22, 494, 534, 16);
+            hanhuaLabel.Bounds = new Rectangle(22, 492, 296, 16);
             hanhuaLabel.ForeColor = ColSub;
             hanhuaLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
             Controls.Add(hanhuaLabel);
@@ -324,8 +322,8 @@ namespace FreebuffController
             // 停下（那时没有手动按钮兜底，重新勾选即可恢复）。
             chkHanhuaAuto = new CheckBox();
             chkHanhuaAuto.AutoSize = false;
-            chkHanhuaAuto.Text = "自动应用汉化（更新后 / 启动 Freebuff 前）";
-            chkHanhuaAuto.Bounds = new Rectangle(22, 520, 340, 20);
+            chkHanhuaAuto.Text = "自动应用汉化";
+            chkHanhuaAuto.Bounds = new Rectangle(22, 516, 220, 20);
             chkHanhuaAuto.ForeColor = ColSub;
             chkHanhuaAuto.BackColor = ColBg;
             chkHanhuaAuto.Font = new Font("Microsoft YaHei UI", 8.5f);
@@ -338,7 +336,7 @@ namespace FreebuffController
             statusLabel = new Label();
             statusLabel.AutoSize = false;
             statusLabel.Text = ReadyStatus();
-            statusLabel.Bounds = new Rectangle(22, 546, 330, 16);
+            statusLabel.Bounds = new Rectangle(22, 544, 536, 16);
             statusLabel.ForeColor = ColSub;
             statusLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
             Controls.Add(statusLabel);
@@ -346,27 +344,15 @@ namespace FreebuffController
             versionLink = new Label();
             versionLink.AutoSize = false;
             versionLink.Text = string.IsNullOrEmpty(installedVersion)
-                ? "Freebuff 版本未知 · 检查更新"
-                : "Freebuff v" + installedVersion + " · 检查更新";
-            versionLink.Bounds = new Rectangle(354, 546, 206, 16);
+                ? "版本未知 · 检查更新"
+                : "v" + installedVersion + " · 检查更新";
+            versionLink.Bounds = new Rectangle(322, 492, 236, 16);
             versionLink.ForeColor = ColSub;
             versionLink.Font = new Font("Microsoft YaHei UI", 8.5f);
             versionLink.TextAlign = ContentAlignment.MiddleRight;
             versionLink.Cursor = Cursors.Hand;
             versionLink.Click += delegate { OnVersionLinkClick(); };
             Controls.Add(versionLink);
-
-            // 更新器缓存的清理入口。放在最底一行：它是一个低频的「收拾角落」动作，
-            // 不该和汉化那排按钮抢位置；文案里带上可释放的字节数，点之前就知道能省多少。
-            cacheLink = new Label();
-            cacheLink.AutoSize = false;
-            cacheLink.Bounds = new Rectangle(22, 572, 400, 16);
-            cacheLink.ForeColor = ColSub;
-            cacheLink.Font = new Font("Microsoft YaHei UI", 8.5f);
-            cacheLink.Cursor = Cursors.Hand;
-            cacheLink.Text = "更新缓存";
-            cacheLink.Click += delegate { OnCleanUpdaterCache(); };
-            Controls.Add(cacheLink);
 
             // High-DPI displays: this layout is authored at 96 DPI and the
             // process is DPI-aware (no OS bitmap scaling), so every fixed
@@ -382,7 +368,6 @@ namespace FreebuffController
 
             hanhuaDir = FindHanhuaDir();
             RefreshHanhuaUi();
-            RefreshCacheLink();
 
             refreshTimer = new System.Windows.Forms.Timer();
             refreshTimer.Interval = 3000;
@@ -422,11 +407,11 @@ namespace FreebuffController
             CheckSelfUpdateAsync();
         }
 
-        // The standing status line spells out the two refresh cycles so the
-        // label never leaves the user guessing what "刷新" covers.
+        // 常态下状态栏留空：底部已经有汉化状态与版本行，再挂一句解释只是噪音。
+        // 有事件（启动 / 还原 / 清理 / 自动应用）时才在这里出现文字，几秒后回落为空。
         private static string ReadyStatus()
         {
-            return "每 3 秒刷新运行状态和账号 · 额度每 5 分钟刷新";
+            return "";
         }
 
         // Transient messages (启动中…、已重置 ✓ …) fall back to the standing
@@ -571,6 +556,9 @@ namespace FreebuffController
             trayHanhuaAuto.Checked = autoHanhuaEnabled;
             trayHanhuaAuto.Click += delegate { SetHanhuaAuto(trayHanhuaAuto.Checked); };
             menu.Items.Add(trayHanhuaAuto);
+            // 缓存清理是自动的（启动时 / 检测到 Freebuff 更新后），窗口里不再常驻入口；
+            // 这里留一个手动兜底，先把窗口叫出来再弹确认框，免得对话框没有归属。
+            menu.Items.Add("清理更新缓存…", null, delegate { ShowUp(); OnCleanUpdaterCache(); });
             menu.Items.Add("退出", null, delegate { Close(); });
             tray.ContextMenuStrip = menu;
             tray.DoubleClick += delegate { ShowUp(); };
@@ -1341,8 +1329,7 @@ namespace FreebuffController
             {
                 if (IsDisposed) return;
                 RefreshHanhuaUi();
-                RefreshCacheLink();   // 自动更新刚落地：缓存里多了一份新安装包
-                PruneDownloadedInstaller(); // 同理，我们下的那份安装包也该删了
+                PruneDownloadedInstaller(); // 我们下的那份安装包装完就没用了
                 AutoCleanUpdaterCache("检测到 Freebuff 更新"); // 官方更新器攒下的旧包一起收拾
                 CheckPackUpdateAsync();
                 // 装机版本变了：多半是自动更新刚把汉化覆盖掉。开关打开时立刻恢复，
@@ -1503,20 +1490,20 @@ namespace FreebuffController
             if (updateStarted)
             {
                 versionLink.Text = (HanhuaBuildDir(hanhuaDir) != null)
-                    ? "安装包已启动 · 装完后启动时会自动换回中文"
-                    : "安装包已启动 · 按提示完成安装";
+                    ? "安装包已启动 · 装完自动换回中文"
+                    : "安装包已启动";
                 versionLink.ForeColor = ColSub;
                 return;
             }
             if (updateFailed)
             {
-                versionLink.Text = "下载失败 · 再点打开下载页";
+                versionLink.Text = "下载失败 · 点此开下载页";
                 versionLink.ForeColor = ColNewVersion;
                 return;
             }
             if (UpdateAvailable())
             {
-                versionLink.Text = "发现新版本 v" + latestVersion + " · 点击更新";
+                versionLink.Text = "可更新 v" + latestVersion + " · 点击更新";
                 versionLink.ForeColor = ColNewVersion;
                 return;
             }
@@ -1527,8 +1514,8 @@ namespace FreebuffController
                 return;
             }
             versionLink.Text = (string.IsNullOrEmpty(installedVersion)
-                    ? "Freebuff 版本未知"
-                    : "Freebuff v" + installedVersion) + " · 已是最新";
+                    ? "版本未知"
+                    : "v" + installedVersion) + " · 已最新";
             versionLink.ForeColor = ColSub;
         }
 
@@ -3513,7 +3500,7 @@ namespace FreebuffController
             var inst = ParseLooseVersion(installedVersion);
             var target = ParseLooseVersion(tv);
             bool outdated = inst != null && target != null && inst.CompareTo(target) > 0;
-            string tag = (tv == null) ? "" : "（词典 v" + tv + (outdated ? "，已过时" : "") + "）";
+            string tag = (tv == null) ? "" : " · " + tv + (outdated ? "（过时）" : "");
 
             // output/ 里待应用的那份包比装机的版本戳新（本地刚构建，或刚被
             // CheckPackUpdateAsync 暂存进来）——StartAutoRestoreHanhua 会把它换上。
@@ -3522,14 +3509,14 @@ namespace FreebuffController
 
             if (applied)
                 hanhuaLabel.Text = newerPack
-                    ? ("汉化：已应用 · 有新包 v" + outPack + "，自动应用待命")
-                    : ((build != null) ? ("汉化：已应用" + tag) : "汉化：已应用");
+                    ? ("汉化 ✓ · 新包 " + outPack + " 待换")
+                    : ("汉化 ✓" + tag);
             else if (build != null)
-                hanhuaLabel.Text = "汉化：未应用 · 自动应用待命" + tag;
+                hanhuaLabel.Text = "汉化 ✗ 待自动应用" + tag;
             else if (hanhuaDir != null)
-                hanhuaLabel.Text = "汉化：未应用 · 缺少构建（先运行 build.sh）";
+                hanhuaLabel.Text = "汉化 ✗ 缺构建";
             else
-                hanhuaLabel.Text = "汉化：未应用 · 未找到仓库（freebuff-zh / hanhua/）";
+                hanhuaLabel.Text = "汉化 ✗ 未找到仓库";
             hanhuaLabel.ForeColor = ((!applied && build != null) || newerPack) ? ColGreen : ColSub;
         }
 
@@ -4074,21 +4061,6 @@ namespace FreebuffController
             catch { return 0; }
         }
 
-        // 状态行：清理已经自动化（启动时 + 检测到 Freebuff 更新后各一次），这里只
-        // 如实报告现在占多少、有没有等到下一轮才会清的。点击仍保留为手动兜底。
-        private void RefreshCacheLink()
-        {
-            if (cacheLink == null) return;
-            List<string> doomed;
-            long reclaimable, total;
-            ScanUpdaterCache(out doomed, out reclaimable, out total);
-            cacheLink.Text = reclaimable > 0
-                ? "更新缓存 " + HumanSize(total) + " · 待自动清理"
-                : (total > 0
-                    ? "更新缓存 " + HumanSize(total) + " · 无可自动清理"
-                    : "更新缓存 · 空");
-        }
-
         private void OnCleanUpdaterCache()
         {
             List<string> doomed;
@@ -4129,7 +4101,6 @@ namespace FreebuffController
                     SetStatus(failed == 0
                         ? "已清理更新缓存 ✓ 释放 " + HumanSize(freed)
                         : "已清理更新缓存 " + HumanSize(freed) + "（" + failed + " 个文件被占用）");
-                    RefreshCacheLink();
                 });
             });
         }
@@ -4138,18 +4109,14 @@ namespace FreebuffController
         // 完全一致——只删版本不高于已装版本的安装包，以及跟着它们一起作废的
         // update-info.json / blockmap，绝不碰比已装版本新的 pending/ 包与根目录的
         // current.blockmap。既然不可能删掉「等着安装的那一份」，就不弹确认框；
-        // 有东西可清才报一句，没得清就只刷新状态行。
+        // 有东西可清才在状态栏报一句（它几秒后自己回落为空白）。
         private void AutoCleanUpdaterCache(string why)
         {
             RefreshInstalledVersion(); // 按最新装机版本判定哪个包还用得上
             List<string> doomed;
             long reclaimable, total;
             ScanUpdaterCache(out doomed, out reclaimable, out total);
-            if (doomed.Count == 0)
-            {
-                RefreshCacheLink();
-                return;
-            }
+            if (doomed.Count == 0) return;
             ThreadPool.QueueUserWorkItem(delegate
             {
                 long freed = 0;
@@ -4171,7 +4138,6 @@ namespace FreebuffController
                     SetStatus(failed == 0
                         ? "已自动清理更新缓存 ✓ 释放 " + HumanSize(freed) + "（" + why + "）"
                         : "已自动清理更新缓存 " + HumanSize(freed) + "（" + failed + " 个文件被占用）");
-                    RefreshCacheLink();
                 });
             });
         }
