@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.8.3.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.3.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.6.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.6.0")]
 
 namespace FreebuffController
 {
@@ -148,13 +148,10 @@ namespace FreebuffController
             "https://freebuff.com/api/desktop/updates/win-x64/latest.yml";
         private const string ReleasesPageUrl =
             "https://github.com/CodebuffAI/codebuff-community/releases/latest";
-        // The same endpoint the freebuff.com download button uses; always
-        // redirects to the newest installer.
-        private const string OfficialDownloadUrl =
-            "https://freebuff.com/api/desktop/download/windows";
         private static readonly Color ColNewVersion = Color.FromArgb(245, 185, 66);
 
         private Label versionLink;
+        private Label cacheLink;     // 底部「清理更新缓存」入口
         private Label selfLink;      // "自更新" entry, top-right; visible when self-update pending
         private string installedVersion;
         private string latestVersion; // null until a check succeeds; null also = failed
@@ -173,21 +170,17 @@ namespace FreebuffController
         private static readonly string InstalledUiIndex =
             Path.Combine(FreebuffResources, "orchestrator\\ui\\index.html");
         private const string HanhuaMarker = "<html lang=\"zh-CN\">";
+        // 英文原版备份的保留份数。每份约 40 MB（app.asar 28 MB + ui 12 MB），
+        // 而每次 Freebuff 自动更新把汉化覆盖掉、控制器再自动恢复，就会新增一份。
+        // 保留最近 2 份足够回退（现用 + 一份余量）；更旧的没有意义——那时装机
+        // 文件已经是另一个 Freebuff 版本，拿旧快照还原只会得到半新半旧的装机。
+        private const int HanhuaBackupKeep = 2;
         private static readonly Regex ManifestVersionRegex =
             new Regex("\"targetVersion\"\\s*:\\s*\"([^\"]+)\"");
         private static readonly string HanhuaConfigFile = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "FreebuffController\\hanhua-path.txt");
 
-        // ~\.AGENTS.md: the user-level knowledge file Freebuff's orchestrator
-        // unconditionally folds into every new session's system prompt
-        // ("Project instructions: … Follow them for the rest of the session").
-        // A language rule there makes the agent reply in Chinese regardless of
-        // the user's input language — UI localization (hanhua) does NOT do
-        // this. Version-independent, survives Freebuff auto-updates.
-        private static readonly string UserAgentsMd = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".AGENTS.md");
         private const string ChineseReplyMarker = "# 语言规则 / Language Rule";
 
         private Label hanhuaLabel;
@@ -200,6 +193,19 @@ namespace FreebuffController
         // and re-check for a pack right away instead of waiting 30 minutes.
         private string hanhuaRecheckVersion;
         private int hanhuaBusy;
+        // 自动恢复汉化（默认开）：Freebuff 的自动更新会把 app.asar 与 ui/ 换回
+        // 英文原版，开关打开时控制器自己换回中文，用户不必记得点「应用汉化」。
+        // 开关状态存在 hanhua-auto.txt（缺省 = 开）；用户手动「还原英文」会写下
+        // hanhua-english.txt，自动恢复遇到它就停手，免得把用户选的英文又改回中文。
+        private CheckBox chkHanhuaAuto;
+        private ToolStripMenuItem trayHanhuaAuto;
+        private bool autoHanhuaEnabled;
+        private static readonly string HanhuaAutoConfigFile = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "FreebuffController\\hanhua-auto.txt");
+        private static readonly string HanhuaEnglishOptOutFile = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "FreebuffController\\hanhua-english.txt");
 
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
@@ -211,6 +217,7 @@ namespace FreebuffController
                     "未找到 Freebuff 桌面版：\n" + FreebuffExe + "\n\n请先安装 Freebuff。");
             installedVersion = ReadInstalledVersion();
             hanhuaRecheckVersion = installedVersion; // startup refresh below
+            autoHanhuaEnabled = ReadHanhuaAutoEnabled(); // 缺省开，勾选框按它初始化
             BuildUi();
         }
 
@@ -242,7 +249,7 @@ namespace FreebuffController
         private void BuildUi()
         {
             Text = "Freebuff 多开控制器 v" + System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
-            ClientSize = new Size(580, 546);
+            ClientSize = new Size(580, 596); // 底部：自动恢复开关 + 清理更新缓存
             BackColor = ColBg;
             ForeColor = ColText;
             Font = new Font("Microsoft YaHei UI", 9.75f);
@@ -316,12 +323,25 @@ namespace FreebuffController
             btnHanhuaRestore = MakeButton("还原英文", 460, 484, 100, ColNeutral, ColNeutralHover);
             btnHanhuaRestore.Click += delegate { OnHanhuaRestore(); };
 
+            // 自动恢复开关：Freebuff 自更新把汉化覆盖掉之后，启动实例前自动换回
+            // 中文。默认勾选；取消勾选就完全交回手动（历史行为）。
+            chkHanhuaAuto = new CheckBox();
+            chkHanhuaAuto.AutoSize = false;
+            chkHanhuaAuto.Text = "更新后自动恢复汉化（启动 Freebuff 前）";
+            chkHanhuaAuto.Bounds = new Rectangle(22, 520, 340, 20);
+            chkHanhuaAuto.ForeColor = ColSub;
+            chkHanhuaAuto.BackColor = ColBg;
+            chkHanhuaAuto.Font = new Font("Microsoft YaHei UI", 8.5f);
+            chkHanhuaAuto.Checked = autoHanhuaEnabled;
+            chkHanhuaAuto.CheckedChanged += delegate { SetHanhuaAuto(chkHanhuaAuto.Checked); };
+            Controls.Add(chkHanhuaAuto);
+
             BuildTray();
 
             statusLabel = new Label();
             statusLabel.AutoSize = false;
             statusLabel.Text = ReadyStatus();
-            statusLabel.Bounds = new Rectangle(22, 524, 330, 16);
+            statusLabel.Bounds = new Rectangle(22, 546, 330, 16);
             statusLabel.ForeColor = ColSub;
             statusLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
             Controls.Add(statusLabel);
@@ -331,13 +351,25 @@ namespace FreebuffController
             versionLink.Text = string.IsNullOrEmpty(installedVersion)
                 ? "Freebuff 版本未知 · 检查更新"
                 : "Freebuff v" + installedVersion + " · 检查更新";
-            versionLink.Bounds = new Rectangle(354, 524, 206, 16);
+            versionLink.Bounds = new Rectangle(354, 546, 206, 16);
             versionLink.ForeColor = ColSub;
             versionLink.Font = new Font("Microsoft YaHei UI", 8.5f);
             versionLink.TextAlign = ContentAlignment.MiddleRight;
             versionLink.Cursor = Cursors.Hand;
             versionLink.Click += delegate { OnVersionLinkClick(); };
             Controls.Add(versionLink);
+
+            // 更新器缓存的清理入口。放在最底一行：它是一个低频的「收拾角落」动作，
+            // 不该和汉化那排按钮抢位置；文案里带上可释放的字节数，点之前就知道能省多少。
+            cacheLink = new Label();
+            cacheLink.AutoSize = false;
+            cacheLink.Bounds = new Rectangle(22, 572, 400, 16);
+            cacheLink.ForeColor = ColSub;
+            cacheLink.Font = new Font("Microsoft YaHei UI", 8.5f);
+            cacheLink.Cursor = Cursors.Hand;
+            cacheLink.Text = "更新缓存";
+            cacheLink.Click += delegate { OnCleanUpdaterCache(); };
+            Controls.Add(cacheLink);
 
             // High-DPI displays: this layout is authored at 96 DPI and the
             // process is DPI-aware (no OS bitmap scaling), so every fixed
@@ -353,6 +385,7 @@ namespace FreebuffController
 
             hanhuaDir = FindHanhuaDir();
             RefreshHanhuaUi();
+            RefreshCacheLink();
 
             refreshTimer = new System.Windows.Forms.Timer();
             refreshTimer.Interval = 3000;
@@ -423,6 +456,20 @@ namespace FreebuffController
             }
             statusRevertTimer.Stop();
             statusRevertTimer.Start();
+        }
+
+        // 「清理了哪些备份」这种细节挤在别的短句后面会被 330px 的状态栏截断，所以等
+        // 主文案自己回落成常驻提示（8s）后再单独占用整行；期间用户又触发了别的状态
+        // 就整条跳过，不跟用户的操作抢话。
+        private void ShowStatusAfterIdle(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            Delay(9000, delegate
+            {
+                if (IsDisposed || statusLabel == null) return;
+                if (statusLabel.Text != ReadyStatus()) return;
+                SetStatus(text);
+            });
         }
 
         private void BuildGrid()
@@ -521,6 +568,12 @@ namespace FreebuffController
 
             var menu = new ContextMenuStrip();
             menu.Items.Add("打开", null, delegate { ShowUp(); });
+            // 托盘里也放一份开关：控制器多数时间缩在托盘，窗口底部那行看不到。
+            trayHanhuaAuto = new ToolStripMenuItem("更新后自动恢复汉化");
+            trayHanhuaAuto.CheckOnClick = true;
+            trayHanhuaAuto.Checked = autoHanhuaEnabled;
+            trayHanhuaAuto.Click += delegate { SetHanhuaAuto(trayHanhuaAuto.Checked); };
+            menu.Items.Add(trayHanhuaAuto);
             menu.Items.Add("退出", null, delegate { Close(); });
             tray.ContextMenuStrip = menu;
             tray.DoubleClick += delegate { ShowUp(); };
@@ -639,6 +692,22 @@ namespace FreebuffController
                 "Freebuff-slot-" + n);
         }
 
+        private static bool IsOwnFreebuffProcess(ManagementObject process)
+        {
+            try
+            {
+                string path = process["ExecutablePath"] as string;
+                if (string.IsNullOrEmpty(path)) return false;
+                string actual = Path.GetFullPath(path).TrimEnd('\\', '/');
+                string expected = Path.GetFullPath(FreebuffExe).TrimEnd('\\', '/');
+                return string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private static HashSet<int> QueryRunning(out bool mainRunning)
         {
             var slots = new HashSet<int>();
@@ -646,10 +715,11 @@ namespace FreebuffController
             try
             {
                 using (var searcher = new ManagementObjectSearcher(
-                    "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='Freebuff.exe'"))
+                    "SELECT ProcessId, CommandLine, ExecutablePath FROM Win32_Process WHERE Name='Freebuff.exe'"))
                 {
                     foreach (ManagementObject o in searcher.Get())
                     {
+                        if (!IsOwnFreebuffProcess(o)) continue;
                         string cl = o["CommandLine"] as string;
                         if (string.IsNullOrEmpty(cl)) continue;
                         Match m = SlotRegex.Match(cl);
@@ -1261,8 +1331,9 @@ namespace FreebuffController
         // version changes the on-screen status can lag the real disk state
         // until the 30-minute version timer. Re-armed here (on the 3s grid
         // refresh and every version check), it re-reads the hanhua state and
-        // re-checks for a newer pack immediately. Refresh-only: it never
-        // applies anything on its own — the user still clicks 应用汉化.
+        // re-checks for a newer pack immediately. With 自动恢复汉化 on (default) it
+        // also re-applies the localization: a version change almost always means
+        // Freebuff's updater just overwrote app.asar and ui/.
         private void RefreshHanhuaLive()
         {
             if (IsDisposed) return;
@@ -1273,7 +1344,12 @@ namespace FreebuffController
             {
                 if (IsDisposed) return;
                 RefreshHanhuaUi();
+                RefreshCacheLink();   // 自动更新刚落地：缓存里多了一份新安装包
+                PruneDownloadedInstaller(); // 同理，我们下的那份安装包也该删了
                 CheckPackUpdateAsync();
+                // 装机版本变了：多半是自动更新刚把汉化覆盖掉。开关打开时立刻恢复，
+                // 不等用户发现界面变回英文再点按钮。
+                StartAutoRestoreHanhua("检测到 Freebuff 更新", null);
             });
         }
 
@@ -1397,6 +1473,8 @@ namespace FreebuffController
                         {
                             updateStarted = false;
                             updateFailed = false;
+                            // 装机追平更新源 = 这次更新装完了，删掉我们下的安装包。
+                            PruneDownloadedInstaller();
                         }
                         ApplyVersionUi(false);
                         if (UpdateAvailable() && !updateStarted)
@@ -1501,35 +1579,29 @@ namespace FreebuffController
             ThreadPool.QueueUserWorkItem(delegate
             {
                 Exception error = null;
-                bool shaVerified = false;
+                string installerPath = null; // 记下来，装完之后要删掉
                 try
                 {
-                    // latest.yml gives the exact file name + SHA512. If it
-                    // can't be fetched we still try the official download
-                    // link, just without hash verification — and say so in
-                    // the status line once the installer is launched.
-                    string file = "Freebuff-setup.exe";
-                    string shaB64 = null;
-                    string derivedUrl = null;
+                    // latest.yml gives the exact file name + SHA512. Do not
+                    // launch an installer when either piece is unavailable.
+                    string file;
+                    string shaB64;
+                    string derivedUrl;
                     string yml = FetchUrlBody(ReadUpdateFeedUrl());
-                    if (yml != null)
-                    {
-                        Match pm = YamlPathRegex.Match(yml);
-                        if (pm.Success)
-                        {
-                            file = pm.Groups[1].Value.Trim();
-                            derivedUrl = FeedBase() + "/" + file;
-                        }
-                        Match sm = YamlShaRegex.Match(yml);
-                        if (sm.Success)
-                        {
-                            shaB64 = sm.Groups[1].Value.Trim();
-                            shaVerified = true;
-                        }
-                    }
+                    if (yml == null)
+                        throw new ApplicationException("无法获取 latest.yml，已停止未校验下载");
+                    Match pm = YamlPathRegex.Match(yml);
+                    Match sm = YamlShaRegex.Match(yml);
+                    if (!pm.Success || !sm.Success)
+                        throw new ApplicationException("latest.yml 缺少安装包路径或 SHA512，已停止下载");
+                    file = pm.Groups[1].Value.Trim();
+                    shaB64 = sm.Groups[1].Value.Trim();
+                    if (!IsSha512Base64(shaB64))
+                        throw new ApplicationException("latest.yml 中的 SHA512 无效，已停止下载");
+                    derivedUrl = FeedBase() + "/" + file;
                     string dest = Path.Combine(Path.GetTempPath(), file);
+                    installerPath = dest;
                     var candidates = new List<string>();
-                    candidates.Add(OfficialDownloadUrl);
                     if (derivedUrl != null) candidates.Add(derivedUrl);
                     DownloadFirstAvailable(candidates, dest, shaB64,
                         delegate(long done, long total)
@@ -1559,9 +1631,9 @@ namespace FreebuffController
                         if (IsDisposed) return;
                         updateStarted = true;
                         ApplyVersionUi(false);
-                        SetStatus("Freebuff 安装包已下载并启动，按提示完成安装。" +
-                            (shaVerified ? "" : "（本次未取得 latest.yml，跳过了 SHA512 校验）") +
-                            "若提示 Freebuff 正在运行，请先“停止全部”。");
+                        // 装完之后要删的就是这一份（见 PruneDownloadedInstaller）。
+                        SavePendingInstaller(latestVersion, installerPath);
+                        SetStatus("Freebuff 安装包已下载并启动，按提示完成安装。若提示 Freebuff 正在运行，请先“停止全部”。");
                     });
                 }
                 else
@@ -1575,6 +1647,70 @@ namespace FreebuffController
                     });
                 }
             });
+        }
+
+        // ---------- 装完删包 (prune the installer we downloaded) ----------
+        // 控制器自己下到 %TEMP% 的那份官方安装包，装完之后没有任何用处——留着
+        // 只是一份 ~150 MB 级的残留（官方 electron-updater 自己攒的缓存另有
+        // 「清理更新缓存」入口，按它自己的规则处理，这里不碰）。路径连同下载时
+        // 的目标版本落到 pending-installer.txt（"版本<TAB>路径"），所以「装完
+        // 才关控制器」的机器下次启动也还能收拾掉。
+        private static readonly string PendingInstallerFile = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "FreebuffController\\pending-installer.txt");
+
+        private static void SavePendingInstaller(string version, string path)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(PendingInstallerFile));
+                File.WriteAllText(PendingInstallerFile, (version ?? "") + "\t" + path);
+            }
+            catch { }
+        }
+
+        // 装机版本追平下载时的目标版本 = 这次更新已经装完，安装包可以删了。
+        // 删不掉——安装器还占着文件、或权限不足——就把记录留着，下一轮检查
+        // （3 秒的网格刷新 / 30 分钟版本检查）再试，绝不影响更新本身。
+        private void PruneDownloadedInstaller()
+        {
+            try
+            {
+                if (!File.Exists(PendingInstallerFile)) return;
+                string[] parts = File.ReadAllText(PendingInstallerFile).Split('\t');
+                if (parts.Length != 2)
+                {
+                    File.Delete(PendingInstallerFile); // 记录坏了：扔了重来
+                    return;
+                }
+                string target = parts[0].Trim();
+                string path = parts[1].Trim();
+                var inst = ParseLooseVersion(installedVersion);
+                var want = ParseLooseVersion(target);
+                // 还没装到目标版本：包还有用（用户可能刚点了安装、或还没点），别动。
+                if (inst == null || want == null || inst.CompareTo(want) < 0) return;
+
+                long size = 0;
+                bool present = false;
+                try
+                {
+                    if (!string.IsNullOrEmpty(path) && File.Exists(path))
+                    {
+                        size = new FileInfo(path).Length;
+                        present = true;
+                    }
+                }
+                catch { }
+                if (present)
+                {
+                    File.Delete(path);
+                    SetStatus("Freebuff 已更新到 v" + installedVersion +
+                        "，已删除下载的安装包（释放 " + HumanSize(size) + "）");
+                }
+                File.Delete(PendingInstallerFile);
+            }
+            catch { } // 占用 / 无权限：留着下次再试
         }
 
         // GET a URL and return the body, following redirects (the installer
@@ -1615,6 +1751,19 @@ namespace FreebuffController
             return feed.EndsWith("/latest.yml")
                 ? feed.Substring(0, feed.Length - "/latest.yml".Length)
                 : feed;
+        }
+
+        private static bool IsSha512Base64(string value)
+        {
+            try
+            {
+                return !string.IsNullOrEmpty(value)
+                    && Convert.FromBase64String(value).Length == 64;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         // Tries every candidate URL over every route in OrderedCandidates()
@@ -1787,9 +1936,28 @@ namespace FreebuffController
         {
             base.OnShown(e);
             Delay(600, CheckShareOnStartup);
+            // 备份整理放到共享检查之后（那个可能弹模态框），别互相抢 UI。
+            Delay(1500, PruneHanhuaBackupsOnStartup);
         }
 
         private void LaunchIndex(int rowIndex)
+        {
+            // 汉化正在换文件（自动恢复 / 手动应用）：先排队，写完再拉进程，
+            // 否则 Freebuff 可能读到删了一半的 ui/。
+            if (Interlocked.CompareExchange(ref hanhuaBusy, 0, 0) == 1)
+            {
+                SetStatus("汉化正在换文件 · 写入完成后自动继续启动…");
+                RunWhenHanhuaIdle(delegate { LaunchIndexNow(rowIndex); });
+                return;
+            }
+            // 启动前先自动恢复汉化：进程一起来 resources 就被占用，只能等下次。
+            // 需要换文件时先换完再拉进程（换完的回调里接着 LaunchIndexNow），用户
+            // 从「启动」进去看到的就是中文；不需要换就是同步直通，不多一次延迟。
+            if (StartAutoRestoreHanhua("启动前", delegate { LaunchIndexNow(rowIndex); })) return;
+            LaunchIndexNow(rowIndex);
+        }
+
+        private void LaunchIndexNow(int rowIndex)
         {
             string what = (rowIndex == 0) ? "主实例" : ("实例 " + rowIndex);
             // -1 = fresh login; the init dialog decides for never-used slots.
@@ -2576,13 +2744,10 @@ namespace FreebuffController
             });
         }
 
-        // ---------- 会话接力 (handover, 已弃用，被永久共享取代) ----------
+        // ---------- 会话共享迁移脚本 (shared-session migration) ----------
 
-        // 聊天会话存在每个实例自己的本地 SQLite（projects/<workspace>/
-        // desktop-v2.db），与 state.json 里的登录 token 相互独立。接力 = 把
-        // 选定会话（threads + messages + queue_items + 收据 + 交付记录）从
-        // 一个实例的库复制进另一个实例的库，让接手的账号原样继续聊。合并
-        // 本体在 handover-merge.js 里跑，用的是 Freebuff 自带的
+        // 会话共享首次启用时，需要把各实例的本地 SQLite 合并进主库。
+        // 合并本体在 handover-merge.js 里跑，用的是 Freebuff 自带的
         // resources/bun/bun.exe（bun:sqlite），本 exe 保持零依赖。
 
         // handover-merge.js 的 Base64 —— 由 tools/embed-handover.py 在编译前
@@ -2732,441 +2897,6 @@ namespace FreebuffController
             return false;
         }
 
-        private void OnHandover()
-        {
-            int target = SelectedIndex();
-            if (target == -999)
-            {
-                Info("请先点击选中要接手的实例行（会话要交给谁继续聊）。");
-                return;
-            }
-            if (ReadTokenFor(target) == null)
-            {
-                Info(InstanceTitle(target) + " 还没登录：请先启动它并用接手的账号登录，再来接力。");
-                return;
-            }
-            if (SlotDbPath(target) == null)
-            {
-                Info(InstanceTitle(target) + " 还没有会话数据库：请先启动一次（不用发消息），再回来接力。");
-                return;
-            }
-            if (FindBunExe() == null)
-            {
-                Info("没有找到 Bun 运行时（Freebuff 安装目录 resources\\bun\\bun.exe），\n会话接力需要它来读写本地会话库。");
-                return;
-            }
-
-            var sources = new List<int>();
-            for (int i = 0; i <= MaxSlot; i++)
-            {
-                if (i == target) continue;
-                if (ReadTokenFor(i) == null) continue;
-                if (SlotDbPath(i) == null) continue;
-                sources.Add(i);
-            }
-            if (sources.Count == 0)
-            {
-                Info("没有可接手的来源：其他实例需要已登录且有聊天记录。");
-                return;
-            }
-
-            // 停之前的运行状态，失败时好把窗口拉回来。
-            bool mainWasRunning;
-            HashSet<int> wasRunning = QueryRunning(out mainWasRunning);
-
-            string targetAcct = AccountForState(
-                (target == 0) ? DefaultState : SlotStatePath(target));
-            List<string> picked;
-            Dictionary<string, string> renames;
-            int sourceIdx;
-            using (var dlg = new HandoverDialog(this, target, sources, targetAcct))
-            {
-                if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                picked = dlg.PickedIds;
-                renames = dlg.Renames;
-                sourceIdx = dlg.SourceIndex;
-            }
-            if (picked == null || picked.Count == 0 || sourceIdx < 0) return;
-
-            bool srcRunning = (sourceIdx == 0) ? mainWasRunning : wasRunning.Contains(sourceIdx);
-            bool targetRunning = (target == 0) ? mainWasRunning : wasRunning.Contains(target);
-            if (!Confirm(string.Format(
-                "确定把 {0} 个会话接力到{1}（{2}）继续聊吗？\r\n" +
-                "接力期间两个实例都会短暂停止，完成后自动重新启动。",
-                picked.Count, InstanceTitle(target), targetAcct)))
-                return;
-
-            RunHandoverAsync(sourceIdx, target, picked, renames, srcRunning, targetRunning);
-        }
-
-        // 接力主流程（后台线程）：停两个实例 → 快照来源库 → bun 合并 →
-        // 汇报结果并把相关实例拉起来。失败时把原本在跑的实例拉回来。
-        private void RunHandoverAsync(int src, int target, List<string> ids,
-            Dictionary<string, string> renames, bool srcRunning, bool targetRunning)
-        {
-            SetStatus("会话接力：正在停止相关实例…");
-            string srcKey = (src == 0) ? "main" : src.ToString();
-            string tgtKey = (target == 0) ? "main" : target.ToString();
-            KillInstances(srcKey, tgtKey);
-
-            ThreadPool.QueueUserWorkItem(delegate
-            {
-                string error = null;
-                int copied = 0;
-                string snap = null;
-                string idsFile = null;
-                string renFile = null;
-                try
-                {
-                    WaitSlotsStopped(new int[] { src, target }, 15000);
-                    UiSafe(delegate { SetStatus("会话接力：正在快照来源会话库…"); });
-                    snap = SnapshotDb(src);
-                    if (snap == null) throw new ApplicationException("读取来源会话库失败");
-                    idsFile = WriteJsonTempFile(ids);
-                    renFile = WriteJsonTempFile(renames);
-                    string dstDb = SlotDbPath(target);
-                    if (dstDb == null) throw new ApplicationException("目标实例会话库缺失");
-                    UiSafe(delegate { SetStatus("会话接力：正在合并会话…"); });
-                    string json = RunBunJson(FindBunExe(), ExtractHandoverScript(),
-                        "merge " + Q(snap) + " " + Q(dstDb) + " @" + Q(idsFile) + " @" + Q(renFile));
-                    var res = new JavaScriptSerializer()
-                        .Deserialize<Dictionary<string, object>>(json);
-                    if (res == null || !res.ContainsKey("ok") || !Convert.ToBoolean(res["ok"]))
-                        throw new ApplicationException(
-                            (res != null && res.ContainsKey("error"))
-                                ? Convert.ToString(res["error"])
-                                : "合并脚本执行失败");
-                    var copiedList = (res.ContainsKey("copied") ? res["copied"] : null)
-                        as System.Collections.IEnumerable;
-                    if (copiedList != null)
-                    {
-                        int n = 0;
-                        foreach (object x in copiedList) n++;
-                        copied = n;
-                    }
-                }
-                catch (Exception ex) { error = ex.Message; }
-                finally
-                {
-                    if (snap != null) try { Directory.Delete(Path.GetDirectoryName(snap), true); } catch { }
-                    if (idsFile != null) try { File.Delete(idsFile); } catch { }
-                    if (renFile != null) try { File.Delete(renFile); } catch { }
-                }
-
-                string err = error;
-                int copiedFinal = copied;
-                UiSafe(delegate
-                {
-                    if (IsDisposed) return;
-                    if (err != null)
-                    {
-                        SetStatus("会话接力失败：" + err);
-                        Info("会话接力失败：\n" + err);
-                        if (targetRunning)
-                            Delay(600, delegate { if (target == 0) StartMain(); else StartSlot(target, -1); });
-                        if (srcRunning)
-                            Delay(1200, delegate { if (src == 0) StartMain(); else StartSlot(src, -1); });
-                        return;
-                    }
-                    SetStatus("已把 " + copiedFinal + " 个会话接力到" + InstanceTitle(target) + " ✓ 正在启动…");
-                    if (target == 0) StartMain(); else StartSlot(target, -1);
-                    if (srcRunning)
-                        Delay(1500, delegate { if (src == 0) StartMain(); else StartSlot(src, -1); });
-                    FetchQuotasAsync(true);
-                });
-            });
-        }
-
-        // 会话接力选择对话框：选来源实例 → 勾选会话（多选，可改名）→
-        // 确定后交给 OnHandover 完成停实例 / 合并 / 重启。
-        private class HandoverDialog : Form
-        {
-            private readonly MainForm owner;
-            private readonly ComboBox source = new ComboBox();
-            private readonly List<int> sourceIndex = new List<int>();
-            private readonly CheckedListBox threadsBox = new CheckedListBox();
-            private readonly List<string> threadIds = new List<string>();
-            private readonly TextBox renameBox = new TextBox();
-            private readonly Label listState = new Label();
-            private readonly Label summary = new Label();
-            private List<Dictionary<string, object>> loaded;
-            private int loadSeq; // 只在 UI 线程读写，丢弃过期的读取结果
-
-            public List<string> PickedIds;
-            public Dictionary<string, string> Renames;
-            public int SourceIndex = -1;
-
-            public HandoverDialog(MainForm owner, int target, List<int> sources, string targetAcct)
-            {
-                this.owner = owner;
-                Text = "会话接力 → " + InstanceTitle(target);
-                ClientSize = new Size(426, 376);
-                BackColor = ColPanel;
-                ForeColor = ColText;
-                Font = new Font("Microsoft YaHei UI", 9.75f);
-                FormBorderStyle = FormBorderStyle.FixedDialog;
-                MinimizeBox = false;
-                MaximizeBox = false;
-                ShowInTaskbar = false;
-                StartPosition = FormStartPosition.CenterParent;
-
-                var q = new Label();
-                q.AutoSize = false;
-                q.Text = "把来源实例的聊天会话复制给" + InstanceTitle(target) +
-                    "（" + targetAcct + "）继续。\r\n会话内容原样带走，之后用该实例登录的账号接着对话。";
-                q.Bounds = new Rectangle(16, 12, 394, 36);
-                Controls.Add(q);
-
-                var srcLabel = new Label();
-                srcLabel.Text = "从哪接来：";
-                srcLabel.Bounds = new Rectangle(16, 58, 86, 20);
-                Controls.Add(srcLabel);
-
-                source.DropDownStyle = ComboBoxStyle.DropDownList;
-                source.Bounds = new Rectangle(104, 55, 306, 24);
-                source.BackColor = ColNeutral;
-                source.ForeColor = ColText;
-                source.Font = new Font("Microsoft YaHei UI", 9f);
-                foreach (int i in sources)
-                {
-                    string label = InstanceTitle(i);
-                    string acct = AccountForState((i == 0) ? DefaultState : SlotStatePath(i));
-                    if (!acct.StartsWith("(")) label += "（" + acct + "）";
-                    source.Items.Add(label);
-                    sourceIndex.Add(i);
-                }
-                source.SelectedIndexChanged += delegate { LoadFor(CurrentSource()); };
-                if (source.Items.Count > 0) source.SelectedIndex = 0;
-                Controls.Add(source);
-
-                threadsBox.Bounds = new Rectangle(16, 88, 394, 164);
-                threadsBox.CheckOnClick = true;
-                threadsBox.IntegralHeight = false;
-                threadsBox.BorderStyle = BorderStyle.FixedSingle;
-                threadsBox.BackColor = ColRow;
-                threadsBox.ForeColor = ColText;
-                threadsBox.Font = new Font("Microsoft YaHei UI", 9f);
-                threadsBox.ItemCheck += delegate(object s, ItemCheckEventArgs e)
-                {
-                    // ItemCheck 在状态翻转前触发，所以用 e.NewValue 判断。
-                    int n = 0;
-                    int only = -1;
-                    for (int i = 0; i < threadsBox.Items.Count; i++)
-                    {
-                        bool isChecked = (i == e.Index)
-                            ? (e.NewValue == CheckState.Checked)
-                            : threadsBox.GetItemChecked(i);
-                        if (isChecked) { n++; only = i; }
-                    }
-                    summary.Text = "已选 " + n + " / " + threadsBox.Items.Count + " 个会话";
-                    if (n == 1)
-                    {
-                        renameBox.Text = OriginalTitle(only);
-                        renameBox.Enabled = true;
-                    }
-                    else
-                    {
-                        renameBox.Text = "";
-                        renameBox.Enabled = false;
-                    }
-                };
-                Controls.Add(threadsBox);
-                listState.AutoSize = false;
-                listState.Text = "";
-                listState.Bounds = new Rectangle(16, 256, 394, 16);
-                listState.ForeColor = ColSub;
-                listState.Font = new Font("Microsoft YaHei UI", 8.5f);
-                Controls.Add(listState);
-
-                summary.AutoSize = false;
-                summary.Text = "已选 0 个会话";
-                summary.Bounds = new Rectangle(16, 276, 394, 16);
-                summary.ForeColor = ColSub;
-                summary.Font = new Font("Microsoft YaHei UI", 8.5f);
-                Controls.Add(summary);
-
-                var renameLabel = new Label();
-                renameLabel.Text = "改名（可选）：";
-                renameLabel.Bounds = new Rectangle(16, 300, 100, 20);
-                Controls.Add(renameLabel);
-
-                renameBox.Bounds = new Rectangle(120, 298, 290, 24);
-                renameBox.BackColor = ColNeutral;
-                renameBox.ForeColor = ColText;
-                renameBox.Enabled = false;
-                Controls.Add(renameBox);
-
-                Button cancel = MakeButton("取消", 198, ColNeutral, ColNeutralHover);
-                cancel.DialogResult = DialogResult.Cancel;
-                Button ok = MakeButton("开始接力", 310, ColAccent, ColAccentHover);
-                ok.Click += delegate
-                {
-                    var picked = new List<string>();
-                    for (int i = 0; i < threadsBox.Items.Count; i++)
-                    {
-                        if (threadsBox.GetItemChecked(i) && i < threadIds.Count)
-                            picked.Add(threadIds[i]);
-                    }
-                    if (picked.Count == 0)
-                    {
-                        MessageBox.Show(this, "请先勾选要接力的会话。", "会话接力",
-                            MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        return;
-                    }
-                    PickedIds = picked;
-                    SourceIndex = CurrentSource();
-                    Renames = new Dictionary<string, string>();
-                    if (picked.Count == 1 && renameBox.Enabled && renameBox.Text.Trim().Length > 0)
-                    {
-                        string orig = OriginalTitle(threadIds.IndexOf(picked[0]));
-                        if (renameBox.Text.Trim() != orig)
-                            Renames[picked[0]] = renameBox.Text.Trim();
-                    }
-                    DialogResult = DialogResult.OK;
-                };
-                CancelButton = cancel;
-                AcceptButton = ok;
-
-                ScaleUi(this, DpiScale());
-            }
-
-            private int CurrentSource()
-            {
-                return (source.SelectedIndex >= 0 && source.SelectedIndex < sourceIndex.Count)
-                    ? sourceIndex[source.SelectedIndex] : -1;
-            }
-
-            private string OriginalTitle(int idx)
-            {
-                if (loaded == null || idx < 0 || idx >= loaded.Count) return "";
-                string t = DictText(loaded[idx], "title");
-                return t ?? "";
-            }
-
-            private Button MakeButton(string text, int x, Color back, Color hover)
-            {
-                var b = new Button();
-                b.Text = text;
-                b.Bounds = new Rectangle(x, 332, 100, 32);
-                b.FlatStyle = FlatStyle.Flat;
-                b.FlatAppearance.BorderSize = 0;
-                b.FlatAppearance.MouseOverBackColor = hover;
-                b.FlatAppearance.MouseDownBackColor = hover;
-                b.BackColor = back;
-                b.ForeColor = Color.White;
-                b.Cursor = Cursors.Hand;
-                RoundControl(b, 10);
-                Controls.Add(b);
-                return b;
-            }
-
-            private void LoadFor(int inst)
-            {
-                if (inst < 0) return;
-                int seq = ++loadSeq;
-                threadsBox.Items.Clear();
-                threadIds.Clear();
-                loaded = null;
-                renameBox.Text = "";
-                renameBox.Enabled = false;
-                summary.Text = "已选 0 个会话";
-                listState.Text = "正在读取会话…";
-                ThreadPool.QueueUserWorkItem(delegate
-                {
-                    string snap = null;
-                    try
-                    {
-                        snap = SnapshotDb(inst);
-                        if (snap == null) throw new ApplicationException("没有会话库");
-                        string json = RunBunJson(FindBunExe(), ExtractHandoverScript(),
-                            "list " + Q(snap));
-                        // list 输出是 {"ok":true,"threads":[...]} 包装对象，
-                        // 先解包再取数组（直接反序列化成 List 会得到 null）。
-                        var res = new JavaScriptSerializer()
-                            .Deserialize<Dictionary<string, object>>(json);
-                        var parsed = new List<Dictionary<string, object>>();
-                        if (res != null && res.ContainsKey("threads"))
-                        {
-                            var arr = res["threads"] as System.Collections.IEnumerable;
-                            if (arr != null)
-                            {
-                                foreach (object o in arr)
-                                {
-                                    var d = o as Dictionary<string, object>;
-                                    if (d != null) parsed.Add(d);
-                                }
-                            }
-                        }
-                        if (owner == null || owner.IsDisposed || !owner.IsHandleCreated) return;
-                        try
-                        {
-                            owner.BeginInvoke((MethodInvoker)delegate
-                            {
-                                if (IsDisposed || !IsHandleCreated || loadSeq != seq) return;
-                                Fill(parsed);
-                            });
-                        }
-                        catch { }
-                    }
-                    catch (Exception ex)
-                    {
-                        string msg = ex.Message;
-                        if (owner == null || owner.IsDisposed || !owner.IsHandleCreated) return;
-                        try
-                        {
-                            owner.BeginInvoke((MethodInvoker)delegate
-                            {
-                                if (IsDisposed || !IsHandleCreated || loadSeq != seq) return;
-                                listState.Text = "读取失败：" + msg;
-                            });
-                        }
-                        catch { }
-                    }
-                    finally
-                    {
-                        if (snap != null)
-                            try { Directory.Delete(Path.GetDirectoryName(snap), true); } catch { }
-                    }
-                });
-            }
-
-            private void Fill(List<Dictionary<string, object>> parsed)
-            {
-                listState.Text = "";
-                loaded = parsed ?? new List<Dictionary<string, object>>();
-                threadsBox.BeginUpdate();
-                threadsBox.Items.Clear();
-                threadIds.Clear();
-                foreach (Dictionary<string, object> t in loaded)
-                {
-                    string title = DictText(t, "title");
-                    if (string.IsNullOrEmpty(title)) title = "(未命名会话)";
-                    long msgs = (long)DictNum(t, "messages");
-                    string model = DictText(t, "model");
-                    string status = DictText(t, "status");
-                    string label = title + "　· " + msgs + " 条消息"
-                        + (string.IsNullOrEmpty(model) ? "" : ("　· " + model))
-                        + (status == "closed" ? "　· 已结束" : "　· 进行中");
-                    threadsBox.Items.Add(label, false);
-                    threadIds.Add(DictText(t, "id"));
-                }
-                threadsBox.EndUpdate();
-                if (threadsBox.Items.Count == 0)
-                    listState.Text = "该实例没有可接力的会话";
-            }
-
-            protected override void OnHandleCreated(EventArgs e)
-            {
-                base.OnHandleCreated(e);
-                try
-                {
-                    int on = 1; // DWMWA_USE_IMMERSIVE_DARK_MODE
-                    DwmSetWindowAttribute(Handle, 20, ref on, 4);
-                }
-                catch { }
-            }
-        }
-
         private static void StartMain()
         {
             string url = LaunchProxyUrl();
@@ -3220,10 +2950,11 @@ namespace FreebuffController
             try
             {
                 using (var searcher = new ManagementObjectSearcher(
-                    "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='Freebuff.exe'"))
+                    "SELECT ProcessId, CommandLine, ExecutablePath FROM Win32_Process WHERE Name='Freebuff.exe'"))
                 {
                     foreach (ManagementObject o in searcher.Get())
                     {
+                        if (!IsOwnFreebuffProcess(o)) continue;
                         string cl = o["CommandLine"] as string;
                         if (string.IsNullOrEmpty(cl)) continue;
                         Match m = SlotRegex.Match(cl);
@@ -3381,7 +3112,12 @@ namespace FreebuffController
                     if (err != null)
                         SetStatus("汉化包更新失败：" + err);
                     else if (ver != null)
+                    {
                         SetStatus("汉化包 v" + ver + " 已就绪 · 点「应用汉化」生效。");
+                        // 刚拉到适配新版本的包：装机还是英文时（更新刚覆盖过）把自动
+                        // 恢复续上，状态栏那句随即会被「正在自动恢复」替换。
+                        StartAutoRestoreHanhua("汉化包已就绪", null);
+                    }
                     else if (mis != null)
                         SetStatus(mis);
                     RefreshHanhuaUi();
@@ -3466,7 +3202,6 @@ namespace FreebuffController
             ThreadPool.QueueUserWorkItem(delegate
             {
                 Exception error = null;
-                bool shaVerified = false;
                 try
                 {
                     string json = FetchUrlBody(SelfReleasesApiUrl);
@@ -3479,8 +3214,7 @@ namespace FreebuffController
                         {
                             var a = o as Dictionary<string, object>;
                             string name = a == null ? null : a["name"] as string;
-                            if (name != null && name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-                                && name.IndexOf("setup", StringComparison.OrdinalIgnoreCase) < 0)
+                            if (string.Equals(name, "FreebuffController.exe", StringComparison.OrdinalIgnoreCase))
                             {
                                 exeUrl = a["browser_download_url"] as string;
                             }
@@ -3497,7 +3231,9 @@ namespace FreebuffController
                                         {
                                             string t = line.Trim();
                                             int sp = t.IndexOf(' ');
-                                            if (sp > 0 && t.Substring(sp).Trim().EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                                            if (sp > 0 && string.Equals(
+                                                t.Substring(sp).Trim(), "FreebuffController.exe",
+                                                StringComparison.OrdinalIgnoreCase))
                                             {
                                                 shaHex = t.Substring(0, sp).Trim().ToLowerInvariant();
                                                 break;
@@ -3509,12 +3245,10 @@ namespace FreebuffController
                             }
                         }
                     }
-                    if (exeUrl == null) throw new ApplicationException("Release 里没有找到 exe 附件");
+                    if (exeUrl == null) throw new ApplicationException("Release 里没有找到 FreebuffController.exe");
 
                     // DownloadOnce expects a base64 digest, sha512.txt carries
-                    // hex. A missing or malformed digest falls back to an
-                    // unverified download, disclosed in the status line once
-                    // the exe is staged (same policy as the app-update path).
+                    // hex. A missing or malformed digest stops the update.
                     string shaB64 = null;
                     if (shaHex != null && shaHex.Length == 128)
                     {
@@ -3527,12 +3261,13 @@ namespace FreebuffController
                         }
                         catch { }
                     }
+                    if (!IsSha512Base64(shaB64))
+                        throw new ApplicationException("Release 缺少 FreebuffController.exe 的有效 SHA512，已停止更新");
 
                     string exePath = Application.ExecutablePath;
                     string exeDir = Path.GetDirectoryName(exePath);
                     string exeName = Path.GetFileNameWithoutExtension(exePath);
                     string staged = Path.Combine(exeDir, exeName + ".new-v" + ver + ".exe");
-                    shaVerified = shaB64 != null;
                     DownloadFirstAvailable(new List<string> { exeUrl }, staged, shaB64,
                         delegate(long done, long total)
                         {
@@ -3599,8 +3334,7 @@ namespace FreebuffController
                         selfDownloaded = true;
                         if (selfLink != null)
                             selfLink.Text = "控制器 v" + ver + " 已下载 · 重启生效";
-                        SetStatus("控制器 v" + ver + " 已下载 ✓ 关闭本工具后自动替换并重启。" +
-                            (shaVerified ? "" : "（未取得有效的 sha512.txt，跳过 SHA512 校验）"));
+                        SetStatus("控制器 v" + ver + " 已下载 ✓ 关闭本工具后自动替换并重启。");
                     }
                     else
                     {
@@ -3654,6 +3388,8 @@ namespace FreebuffController
             string asset = man["asset"] as string;
             string sha512 = man["sha512"] as string;
             if (packVersion == null || targetVersion == null || asset == null) return null;
+            if (!IsSha512Base64(sha512))
+                throw new ApplicationException("汉化包缺少有效 SHA512，已停止下载");
 
             // staged >= installed always (applying moves the stamp over), so
             // comparing against the staged stamp covers both "already newest"
@@ -3867,6 +3603,60 @@ namespace FreebuffController
             catch { }
         }
 
+        private static bool ReadHanhuaAutoEnabled()
+        {
+            // 缺省开：装完就生效才是这个开关的意义，不想用的人取消勾选即可。
+            try
+            {
+                if (!File.Exists(HanhuaAutoConfigFile)) return true;
+                return File.ReadAllText(HanhuaAutoConfigFile).Trim() != "0";
+            }
+            catch { return true; }
+        }
+
+        private static void SaveHanhuaAutoEnabled(bool on)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(HanhuaAutoConfigFile));
+                File.WriteAllText(HanhuaAutoConfigFile, on ? "1" : "0");
+            }
+            catch { }
+        }
+
+        private static bool HanhuaEnglishOptOut()
+        {
+            try { return File.Exists(HanhuaEnglishOptOutFile); } catch { return false; }
+        }
+
+        private static void SetHanhuaEnglishOptOut(bool on)
+        {
+            try
+            {
+                if (on)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(HanhuaEnglishOptOutFile));
+                    File.WriteAllText(HanhuaEnglishOptOutFile, "1");
+                }
+                else if (File.Exists(HanhuaEnglishOptOutFile))
+                    File.Delete(HanhuaEnglishOptOutFile);
+            }
+            catch { }
+        }
+
+        // 勾选框与托盘菜单项共用：两边任一被点都走这里，状态不会漂移。
+        private void SetHanhuaAuto(bool on)
+        {
+            autoHanhuaEnabled = on;
+            if (chkHanhuaAuto != null && chkHanhuaAuto.Checked != on) chkHanhuaAuto.Checked = on;
+            if (trayHanhuaAuto != null && trayHanhuaAuto.Checked != on) trayHanhuaAuto.Checked = on;
+            SaveHanhuaAutoEnabled(on);
+            SetStatus(on
+                ? "已开启自动恢复汉化：更新覆盖后启动 Freebuff 前自动换回中文。"
+                : "已关闭自动恢复汉化：更新覆盖后请手动点「应用汉化」。");
+            RefreshHanhuaUi();
+        }
+
         private static bool IsValidHanhuaDir(string dir)
         {
             if (string.IsNullOrEmpty(dir)) return false;
@@ -3918,9 +3708,7 @@ namespace FreebuffController
                 if (!Directory.Exists(FreebuffResources)) return null;
                 string best = null;
                 foreach (string d in Directory.GetDirectories(FreebuffResources, "hanhua-backup-*"))
-                    if (File.Exists(Path.Combine(d, "app.asar"))
-                        && File.Exists(Path.Combine(d, "ui\\index.html"))
-                        && (best == null || string.CompareOrdinal(d, best) > 0)) best = d;
+                    if (IsCompleteBackup(d) && (best == null || string.CompareOrdinal(d, best) > 0)) best = d;
                 return best;
             }
             catch { return null; }
@@ -4130,12 +3918,15 @@ namespace FreebuffController
             ThreadPool.QueueUserWorkItem(delegate
             {
                 Exception error = null;
+                string pruneNote = null;
                 try
                 {
-                    BackupPristineIfNeeded();
+                    pruneNote = BackupPristineIfNeeded();
                     File.Copy(Path.Combine(build, "app.asar"),
                         Path.Combine(FreebuffResources, "app.asar"), true);
                     ReplaceUiDir(Path.Combine(build, "ui"));
+                    // 手动应用 = 用户要中文：解除之前「还原英文」留下的停手标记。
+                    SetHanhuaEnglishOptOut(false);
                 }
                 catch (Exception ex) { error = ex; }
                 Interlocked.Exchange(ref hanhuaBusy, 0);
@@ -4145,19 +3936,92 @@ namespace FreebuffController
                     SetStatus(error == null
                         ? "汉化已应用 ✓ 重启 Freebuff 生效。"
                         : "应用汉化失败：" + HanhuaErrorText(error));
+                    ShowStatusAfterIdle(error == null ? pruneNote : null);
                     RefreshHanhuaUi();
+                    DrainHanhuaWaiters();
                 });
             });
         }
 
-        private static void BackupPristineIfNeeded()
+        // 换文件前给英文原版留一份快照，然后顺手执行保留策略；返回可展示的清理
+        // 说明（没清理 = null）。两件事写在一个函数里：备份是「回退的原料」，清理
+        // 是「别让原料无限堆积」，拆开容易被以后改动漏掉一半。
+        private static string BackupPristineIfNeeded()
         {
-            if (HanhuaApplied()) return; // keep the existing pristine backup
-            string bk = Path.Combine(FreebuffResources,
-                "hanhua-backup-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
-            Directory.CreateDirectory(bk);
-            File.Copy(Path.Combine(FreebuffResources, "app.asar"), Path.Combine(bk, "app.asar"), true);
-            CopyDir(Path.Combine(FreebuffResources, "orchestrator\\ui"), Path.Combine(bk, "ui"));
+            if (!HanhuaApplied())
+            {
+                string bk = Path.Combine(FreebuffResources,
+                    "hanhua-backup-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+                Directory.CreateDirectory(bk);
+                File.Copy(Path.Combine(FreebuffResources, "app.asar"), Path.Combine(bk, "app.asar"), true);
+                CopyDir(Path.Combine(FreebuffResources, "orchestrator\\ui"), Path.Combine(bk, "ui"));
+            }
+            return PruneHanhuaBackups(HanhuaBackupKeep);
+        }
+
+        // 只保留最近 keep 份「完整」备份，其余（更旧的、以及半截的）删除；返回清理
+        // 说明（没清 = null）。排序按目录名（yyyyMMdd-HHmmss）= 时间，与
+        // LatestHanhuaBackup 同一套规则。删除失败（被占用 / 无权限）就留着下次再试：
+        // 清理从来不该影响应用或恢复本身。
+        private static string PruneHanhuaBackups(int keep)
+        {
+            try
+            {
+                if (!Directory.Exists(FreebuffResources)) return null;
+                var dirs = new List<string>(Directory.GetDirectories(FreebuffResources, "hanhua-backup-*"));
+                dirs.Sort(delegate(string a, string b) { return string.CompareOrdinal(b, a); }); // 新 → 旧
+                long freed = 0;
+                int removed = 0;
+                int kept = 0;
+                foreach (string d in dirs)
+                {
+                    if (kept < keep && IsCompleteBackup(d)) { kept++; continue; }
+                    long size = DirSize(d);
+                    try
+                    {
+                        Directory.Delete(d, true);
+                        freed += size;
+                        removed++;
+                    }
+                    catch { } // 占用中：留着，下次再试
+                }
+                if (removed == 0) return null;
+                return "已清理 " + removed + " 份旧汉化备份（" + HumanSize(freed) +
+                    "），只保留最近 " + kept + " 份";
+            }
+            catch { return null; }
+        }
+
+        // 半截的备份不留：只写了 app.asar 没写完 ui/ 的那种，还原过去会让 asar 与
+        // ui 版本对不上。LatestHanhuaBackup 也只认完整的，所以清掉它们不会让
+        // 「还原英文」少一个可选项。
+        private static bool IsCompleteBackup(string dir)
+        {
+            return File.Exists(Path.Combine(dir, "app.asar"))
+                && File.Exists(Path.Combine(dir, "ui\\index.html"));
+        }
+
+        private static long DirSize(string dir)
+        {
+            long total = 0;
+            try
+            {
+                foreach (string f in Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
+                {
+                    try { total += new FileInfo(f).Length; }
+                    catch { }
+                }
+            }
+            catch { }
+            return total;
+        }
+
+        private static string HumanSize(long bytes)
+        {
+            if (bytes >= 1073741824L) return (bytes / 1073741824.0).ToString("0.0") + " GB";
+            if (bytes >= 1048576L) return (bytes / 1048576.0).ToString("0.0") + " MB";
+            if (bytes >= 1024L) return (bytes / 1024.0).ToString("0.0") + " KB";
+            return bytes + " B";
         }
 
         private void OnHanhuaRestore()
@@ -4185,6 +4049,129 @@ namespace FreebuffController
                     File.Copy(Path.Combine(bk, "app.asar"),
                         Path.Combine(FreebuffResources, "app.asar"), true);
                     ReplaceUiDir(Path.Combine(bk, "ui"));
+                    // 用户主动选英文：记一笔，自动恢复从此停手，直到他再点「应用汉化」。
+                    SetHanhuaEnglishOptOut(true);
+                }
+                catch (Exception ex) { error = ex; }
+                Interlocked.Exchange(ref hanhuaBusy, 0);
+                UiSafe(delegate
+                {
+                    if (IsDisposed) return;
+                    // 用户主动选英文：自动恢复停手（下次得点「应用汉化」才会再换），
+                    // 状态栏把这件事说清楚，避免他以为开关坏了。
+                    if (error != null)
+                        SetStatus("还原失败：" + HanhuaErrorText(error));
+                    else if (autoHanhuaEnabled)
+                        SetStatus("已还原英文原版 ✓ 自动恢复已暂停（点「应用汉化」恢复中文）");
+                    else
+                        SetStatus("已还原英文原版 ✓ 重启 Freebuff 生效。");
+                    RefreshHanhuaUi();
+                    DrainHanhuaWaiters();
+                });
+            });
+        }
+
+        // ---------- 自动恢复汉化 ----------
+
+        // 换文件期间被请求启动的实例。汉化在写 app.asar / ui/ 时不能拉进程：
+        // Freebuff 可能读到删了一半的 ui/ 目录。排队等写完再继续。
+        private readonly List<Action> hanhuaWaiters = new List<Action>();
+
+        private void RunWhenHanhuaIdle(Action action)
+        {
+            if (action == null) return;
+            if (Interlocked.CompareExchange(ref hanhuaBusy, 0, 0) == 0)
+            {
+                action();
+                return;
+            }
+            lock (hanhuaWaiters) hanhuaWaiters.Add(action);
+        }
+
+        // 在 UI 线程上排空等待队列（三个换文件流程的完成回调里都会调）。
+        private void DrainHanhuaWaiters()
+        {
+            Action[] pending;
+            lock (hanhuaWaiters)
+            {
+                if (hanhuaWaiters.Count == 0) return;
+                pending = hanhuaWaiters.ToArray();
+                hanhuaWaiters.Clear();
+            }
+            foreach (Action a in pending) a();
+        }
+
+        // 启动时后台收一遍备份：老版本控制器（或命令行 apply.sh）可能已经堆了一串
+        // hanhua-backup-*，不必等下一次更新才整理。它占用 hanhuaBusy 与换文件流程
+        // 互斥，所以完成时必须像那三个流程一样排空等待队列——否则此刻点「启动」
+        // 会被永远挂在队列里。
+        private void PruneHanhuaBackupsOnStartup()
+        {
+            if (Interlocked.CompareExchange(ref hanhuaBusy, 1, 0) != 0) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string note = null;
+                try { note = PruneHanhuaBackups(HanhuaBackupKeep); }
+                catch { }
+                Interlocked.Exchange(ref hanhuaBusy, 0);
+                UiSafe(delegate
+                {
+                    if (IsDisposed) return;
+                    if (note != null) SetStatus(note);
+                    RefreshHanhuaUi();   // 期间被置灰的两个按钮要恢复
+                    DrainHanhuaWaiters();
+                });
+            });
+        }
+
+        // 启动实例前 / 检测到装机版本变化时的自动恢复。返回 true = 已在后台开始
+        // 换文件，完成后回调 onDone（启动流程靠它接着拉进程；其余调用传 null）。
+        //
+        // 只在「确定该换、也能安全换」时动手，其余一律放行给现有流程：
+        //   · 开关关着 / 用户手动选过英文 → 不介入；
+        //   · 装机已是汉化版 → 没什么可恢复（「有新包可应用」仍走手动按钮）；
+        //   · 正在应用或正在下载汉化包 → 让现有流程跑完；
+        //   · 找不到汉化仓库 / output/ 里没有构建 → 静默跳过（用户点按钮时才弹目录选择）；
+        //   · 构建的 targetVersion 与装机版本对不上 → 装了会引用不存在的 bundle，跳过；
+        //   · 有实例正在运行 → 不抢文件（换文件会打断任务），等下次触发。
+        private bool StartAutoRestoreHanhua(string why, Action onDone)
+        {
+            if (!autoHanhuaEnabled) return false;
+            if (HanhuaEnglishOptOut()) return false;
+            if (HanhuaApplied()) return false;
+            if (Interlocked.CompareExchange(ref hanhuaBusy, 1, 0) != 0) return false;
+            if (Interlocked.CompareExchange(ref packBusy, 0, 0) == 1)
+            {
+                Interlocked.Exchange(ref hanhuaBusy, 0);
+                return false;
+            }
+            string build = IsValidHanhuaDir(hanhuaDir) ? HanhuaBuildDir(hanhuaDir) : null;
+            string tv = build == null
+                ? null
+                : (OutputPackVersion(hanhuaDir) ?? HanhuaTargetVersion(hanhuaDir));
+            if (build == null || !PackTargetsInstalled(tv, installedVersion))
+            {
+                Interlocked.Exchange(ref hanhuaBusy, 0);
+                return false;
+            }
+            bool mainRunning;
+            HashSet<int> slots = QueryRunning(out mainRunning);
+            if (mainRunning || slots.Count > 0)
+            {
+                Interlocked.Exchange(ref hanhuaBusy, 0);
+                return false;
+            }
+            SetStatus("检测到汉化未应用 · 正在自动恢复…（" + why + "）");
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Exception error = null;
+                string pruneNote = null;
+                try
+                {
+                    pruneNote = BackupPristineIfNeeded();
+                    File.Copy(Path.Combine(build, "app.asar"),
+                        Path.Combine(FreebuffResources, "app.asar"), true);
+                    ReplaceUiDir(Path.Combine(build, "ui"));
                 }
                 catch (Exception ex) { error = ex; }
                 Interlocked.Exchange(ref hanhuaBusy, 0);
@@ -4192,11 +4179,177 @@ namespace FreebuffController
                 {
                     if (IsDisposed) return;
                     SetStatus(error == null
-                        ? "已还原英文原版 ✓ 重启 Freebuff 生效。"
-                        : "还原失败：" + HanhuaErrorText(error));
+                        ? "已自动恢复汉化 ✓ 下次打开 Freebuff 就是中文。"
+                        : "自动恢复汉化失败：" + HanhuaErrorText(error) + "（可点「应用汉化」重试）");
+                    ShowStatusAfterIdle(error == null ? pruneNote : null);
                     RefreshHanhuaUi();
+                    if (onDone != null) onDone();
+                    DrainHanhuaWaiters();
                 });
             });
+            return true;
+        }
+
+        // ---------- Freebuff 更新器缓存 (electron-updater cache) ----------
+
+        // 官方更新器把下好的安装包放在这里：安装器本体 + pending/ 里「等退出时装」
+        // 的那一份，另加差分下载用的 blockmap。每更新一次就多一份 150 MB 的包，
+        // 实测能攼到 300 MB 上下。而它们对已经在跑的版本毫无用处：真正执行安装的是
+        // 被启动的那个安装器进程，不是这个缓存。
+        private static readonly string UpdaterCacheDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "@codebufffreebuff-desktop-updater");
+
+        // 扫一遍缓存，算出总占用、可安全清理的文件与字节数。
+        // 判定标准只有一条：安装包版本 ≤ 已装版本才可删。比已装版本新的 pending 包
+        // 是「退出时自动安装」的更新，删掉等于取消了用户已经下好的更新；读不出版本的
+        // .exe 也一律不动——宁可少清理一点，也不猜。
+        private void ScanUpdaterCache(out List<string> doomed, out long reclaimable, out long total)
+        {
+            doomed = new List<string>();
+            reclaimable = 0;
+            total = 0;
+            try
+            {
+                if (!Directory.Exists(UpdaterCacheDir)) return;
+                var keepDir = new Dictionary<string, bool>(); // 目录 → 里面还有要留的安装包
+                foreach (string f in Directory.GetFiles(UpdaterCacheDir, "*", SearchOption.AllDirectories))
+                {
+                    long len = FileLength(f);
+                    total += len;
+                    if (!string.Equals(Path.GetExtension(f), ".exe", StringComparison.OrdinalIgnoreCase)) continue;
+                    var ver = ParseLooseVersion(ExeFileVersion(f));
+                    var inst = ParseLooseVersion(installedVersion);
+                    if (ver != null && inst != null && ver.CompareTo(inst) <= 0)
+                    {
+                        doomed.Add(f);
+                        reclaimable += len;
+                    }
+                    else
+                    {
+                        string dir = Path.GetDirectoryName(f);
+                        if (dir != null) keepDir[dir] = true;
+                    }
+                }
+                // pending/ 里的 update-info.json 与 blockmap 只描述它自己那个安装包：
+                // 包能删它们就是垃圾，包要留就一起留。根目录的 current.blockmap 不动
+                // （差分下载要用，而且只有 160 KB）。
+                foreach (string f in Directory.GetFiles(UpdaterCacheDir, "*", SearchOption.AllDirectories))
+                {
+                    if (string.Equals(Path.GetExtension(f), ".exe", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!IsUpdaterBookkeeping(f)) continue;
+                    string dir = Path.GetDirectoryName(f);
+                    if (dir == null || keepDir.ContainsKey(dir)) continue;
+                    if (string.Equals(dir, UpdaterCacheDir, StringComparison.OrdinalIgnoreCase)) continue;
+                    doomed.Add(f);
+                    reclaimable += FileLength(f);
+                }
+            }
+            catch { }
+        }
+
+        private static bool IsUpdaterBookkeeping(string file)
+        {
+            string name = Path.GetFileName(file);
+            return string.Equals(name, "update-info.json", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith(".blockmap", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // 安装包的版本从 PE 资源里读（installer.exe 这种名字不带版本号），不靠文件名猜。
+        private static string ExeFileVersion(string path)
+        {
+            try
+            {
+                var vi = FileVersionInfo.GetVersionInfo(path);
+                if (!string.IsNullOrEmpty(vi.FileVersion)) return vi.FileVersion;
+                if (!string.IsNullOrEmpty(vi.ProductVersion)) return vi.ProductVersion;
+            }
+            catch { }
+            return null;
+        }
+
+        private static long FileLength(string path)
+        {
+            try { return new FileInfo(path).Length; }
+            catch { return 0; }
+        }
+
+        // 链接文案就是「点一下能释放多少」；没有可清理的就如实说整个缓存多大，
+        // 点击仍然有反馈（弹窗告知目录在哪、为什么剩下的不能删）。
+        private void RefreshCacheLink()
+        {
+            if (cacheLink == null) return;
+            List<string> doomed;
+            long reclaimable, total;
+            ScanUpdaterCache(out doomed, out reclaimable, out total);
+            cacheLink.Text = reclaimable > 0
+                ? "清理更新缓存（可释放 " + HumanSize(reclaimable) + "）"
+                : (total > 0
+                    ? "更新缓存 " + HumanSize(total) + " · 无需清理"
+                    : "清理更新缓存");
+        }
+
+        private void OnCleanUpdaterCache()
+        {
+            List<string> doomed;
+            long reclaimable, total;
+            ScanUpdaterCache(out doomed, out reclaimable, out total);
+            if (doomed.Count == 0)
+            {
+                Info("更新器缓存里没有可清理的安装包。\r\n\r\n目录：" + UpdaterCacheDir +
+                    "\r\n占用：" + HumanSize(total) +
+                    "\r\n\r\n剩下的要么是正在等安装的更新包（版本比已装的 v" + installedVersion +
+                    " 新），要么是差分下载要用的 blockmap，删了只会让你下次更新重新下一整个包。");
+                return;
+            }
+            if (!Confirm("更新器缓存占用 " + HumanSize(total) + "，其中 " + HumanSize(reclaimable) +
+                " 可以安全清理（" + doomed.Count + " 个文件）。\r\n\r\n" +
+                "删的全是已经用不上的安装包（版本不高于当前 Freebuff v" + installedVersion +
+                "），不影响正在运行的 Freebuff；以后要更新时官方更新器会重新下载。\r\n\r\n要清理吗？"))
+                return;
+            SetStatus("正在清理更新缓存…");
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                long freed = 0;
+                int failed = 0;
+                foreach (string f in doomed)
+                {
+                    long len = FileLength(f);
+                    try
+                    {
+                        File.Delete(f);
+                        freed += len;
+                    }
+                    catch { failed++; } // 占用中（比如更新器正在写）：留给下次
+                }
+                RemoveEmptyUpdaterDirs();
+                UiSafe(delegate
+                {
+                    if (IsDisposed) return;
+                    SetStatus(failed == 0
+                        ? "已清理更新缓存 ✓ 释放 " + HumanSize(freed)
+                        : "已清理更新缓存 " + HumanSize(freed) + "（" + failed + " 个文件被占用）");
+                    RefreshCacheLink();
+                });
+            });
+        }
+
+        // pending/ 空了就顺手去掉，只删空目录，缓存根目录永远保留。
+        private static void RemoveEmptyUpdaterDirs()
+        {
+            try
+            {
+                if (!Directory.Exists(UpdaterCacheDir)) return;
+                foreach (string d in Directory.GetDirectories(UpdaterCacheDir))
+                {
+                    try
+                    {
+                        if (Directory.GetFileSystemEntries(d).Length == 0) Directory.Delete(d);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
         }
     }
 }
