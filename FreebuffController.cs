@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.8.10.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.10.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.11.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.11.0")]
 
 namespace FreebuffController
 {
@@ -371,6 +371,9 @@ namespace FreebuffController
                 CheckSelfUpdateAsync();
                 DetectProxyAsync();
                 RefreshHanhuaUi();
+                // 兜底：上一轮装完时被占用（安装器还开着）而没删掉的旧包，这里补删。
+                // 没东西可清时它什么都不做，也不吭声。
+                AutoCleanUpdaterCache("定期检查");
             };
             versionTimer.Start();
 
@@ -1305,8 +1308,7 @@ namespace FreebuffController
             {
                 if (IsDisposed) return;
                 RefreshHanhuaUi();
-                PruneDownloadedInstaller(); // 我们下的那份安装包装完就没用了
-                AutoCleanUpdaterCache("检测到 Freebuff 更新"); // 官方更新器攒下的旧包一起收拾
+                CleanupAfterUpdate(); // 装完了：我们下的包 + 官方攒的旧包一起收拾
                 CheckPackUpdateAsync();
                 // 装机版本变了：多半是自动更新刚把汉化覆盖掉，立刻换回中文，
                 // 不等用户发现界面变回英文。
@@ -1432,10 +1434,11 @@ namespace FreebuffController
                         var lat = ParseLooseVersion(latest);
                         if (inst != null && lat != null && inst.CompareTo(lat) >= 0)
                         {
+                            bool justInstalled = updateStarted; // 我们拉起的安装器装完了
                             updateStarted = false;
                             updateFailed = false;
-                            // 装机追平更新源 = 这次更新装完了，删掉我们下的安装包。
-                            PruneDownloadedInstaller();
+                            // 装完了就收拾：我们下到 %TEMP% 的安装包 + 更新器缓存里的旧包。
+                            if (justInstalled) CleanupAfterUpdate();
                         }
                         ApplyVersionUi(false);
                         if (UpdateAvailable() && !updateStarted)
@@ -4080,6 +4083,18 @@ namespace FreebuffController
                         : "已自动清理更新缓存 " + HumanSize(freed) + "（" + failed + " 个文件被占用）");
                 });
             });
+        }
+
+        // Freebuff 更新「装完」之后的统一收拾动作：
+        //   · 我们下到 %TEMP% 的那份安装包（有记录才删）；
+        //   · 官方更新器攒在 @codebufffreebuff-desktop-updater 里已经用不上的旧包。
+        // 立刻来一次，20 秒后再补一次——安装器往往还占着自己的包（第一次删不掉），
+        // 退出后就清净了；万一那时仍被占用，还有 30 分钟的定期检查兜底。
+        private void CleanupAfterUpdate()
+        {
+            PruneDownloadedInstaller();
+            AutoCleanUpdaterCache("Freebuff 更新装完");
+            Delay(20000, delegate { AutoCleanUpdaterCache("更新装完复查"); });
         }
 
         // 旧版按钮 / 开关留下的偏好文件，启动时清掉（见 LegacyHanhuaPrefFiles）。
