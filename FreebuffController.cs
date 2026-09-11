@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.8.6.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.6.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.7.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.7.0")]
 
 namespace FreebuffController
 {
@@ -3039,6 +3039,16 @@ namespace FreebuffController
             return PackVersionAt(Path.Combine(hanhuaDir, "output\\ui\\index.html"));
         }
 
+        // output/ 里待应用的那份包是否比装机的新。装机文件没有版本戳时（手工拷进去
+        // 的老包，或 build.sh 打戳之前的产物）按 0.0.0 算——任何带戳的包都算新。
+        // 「汉化包拉完自动应用」与界面上那句「有新包 vX 可应用」共用这一条判断。
+        private bool PendingPackIsNewer()
+        {
+            var outV = ParseLooseVersion(OutputPackVersion(hanhuaDir));
+            var insV = ParseLooseVersion(InstalledPackVersion());
+            return outV != null && outV.CompareTo(insV ?? new Version(0, 0, 0, 0)) > 0;
+        }
+
         private static object[] AsArray(object o)
         {
             if (o is object[]) return (object[])o;
@@ -3113,9 +3123,11 @@ namespace FreebuffController
                         SetStatus("汉化包更新失败：" + err);
                     else if (ver != null)
                     {
-                        SetStatus("汉化包 v" + ver + " 已就绪 · 点「应用汉化」生效。");
-                        // 刚拉到适配新版本的包：装机还是英文时（更新刚覆盖过）把自动
-                        // 恢复续上，状态栏那句随即会被「正在自动恢复」替换。
+                        // 自动应用可能正被上一轮触发、正在换文件：别抢它的状态栏文案。
+                        if (Interlocked.CompareExchange(ref hanhuaBusy, 0, 0) == 0)
+                            SetStatus("汉化包 v" + ver + " 已就绪 · 点「应用汉化」生效。");
+                        // 刚拉到适配本版本的包：装机是英文（更新刚覆盖过）就接着自动恢复，
+                        // 装机是旧版汉化（同版本修正重发）就直接升级，都不必点按钮。
                         StartAutoRestoreHanhua("汉化包已就绪", null);
                     }
                     else if (mis != null)
@@ -3509,10 +3521,7 @@ namespace FreebuffController
             // has something to install even though hanhua is already applied
             // (built locally, or fetched by CheckPackUpdateAsync).
             string outPack = OutputPackVersion(hanhuaDir);
-            var outV = ParseLooseVersion(outPack);
-            var insV = ParseLooseVersion(InstalledPackVersion());
-            bool newerPack = build != null && outV != null
-                && outV.CompareTo(insV ?? new Version(0, 0, 0, 0)) > 0;
+            bool newerPack = build != null && PendingPackIsNewer();
 
             if (applied)
                 hanhuaLabel.Text = newerPack
@@ -4124,12 +4133,14 @@ namespace FreebuffController
             });
         }
 
-        // 启动实例前 / 检测到装机版本变化时的自动恢复。返回 true = 已在后台开始
-        // 换文件，完成后回调 onDone（启动流程靠它接着拉进程；其余调用传 null）。
+        // 汉化的自动应用：装机版本变化 / 启动实例前 / 刚拉到（或刚构建出）新包时。
+        // 返回 true = 已在后台开始换文件，完成后回调 onDone（启动流程靠它接着拉
+        // 进程；其余调用传 null）。
         //
         // 只在「确定该换、也能安全换」时动手，其余一律放行给现有流程：
         //   · 开关关着 / 用户手动选过英文 → 不介入；
-        //   · 装机已是汉化版 → 没什么可恢复（「有新包可应用」仍走手动按钮）；
+        //   · 装机已是汉化版且 output/ 里没有更新的包 → 没什么可换；有更新的包
+        //     （同一 Freebuff 版本的修正重发 v0.0.103.1 这类）就自动换上，不等点击；
         //   · 正在应用或正在下载汉化包 → 让现有流程跑完；
         //   · 找不到汉化仓库 / output/ 里没有构建 → 静默跳过（用户点按钮时才弹目录选择）；
         //   · 构建的 targetVersion 与装机版本对不上 → 装了会引用不存在的 bundle，跳过；
@@ -4138,7 +4149,10 @@ namespace FreebuffController
         {
             if (!autoHanhuaEnabled) return false;
             if (HanhuaEnglishOptOut()) return false;
-            if (HanhuaApplied()) return false;
+            // 装机是英文（Freebuff 更新刚覆盖过）→ 恢复；装机已是中文但 output/ 里
+            // 有更新的包 → 升级换上。两者都不成立就不必介入。
+            bool wasApplied = HanhuaApplied();
+            if (wasApplied && !PendingPackIsNewer()) return false;
             if (Interlocked.CompareExchange(ref hanhuaBusy, 1, 0) != 0) return false;
             if (Interlocked.CompareExchange(ref packBusy, 0, 0) == 1)
             {
@@ -4161,7 +4175,9 @@ namespace FreebuffController
                 Interlocked.Exchange(ref hanhuaBusy, 0);
                 return false;
             }
-            SetStatus("检测到汉化未应用 · 正在自动恢复…（" + why + "）");
+            SetStatus((wasApplied
+                ? "检测到新汉化包 · 正在自动应用…（"
+                : "检测到汉化未应用 · 正在自动恢复…（") + why + "）");
             ThreadPool.QueueUserWorkItem(delegate
             {
                 Exception error = null;
@@ -4179,8 +4195,11 @@ namespace FreebuffController
                 {
                     if (IsDisposed) return;
                     SetStatus(error == null
-                        ? "已自动恢复汉化 ✓ 下次打开 Freebuff 就是中文。"
-                        : "自动恢复汉化失败：" + HanhuaErrorText(error) + "（可点「应用汉化」重试）");
+                        ? (wasApplied
+                            ? "已自动应用新汉化包 ✓ 下次打开 Freebuff 就是新版中文。"
+                            : "已自动恢复汉化 ✓ 下次打开 Freebuff 就是中文。")
+                        : (wasApplied ? "自动应用汉化包失败：" : "自动恢复汉化失败：")
+                          + HanhuaErrorText(error) + "（可点「应用汉化」重试）");
                     ShowStatusAfterIdle(error == null ? pruneNote : null);
                     RefreshHanhuaUi();
                     if (onDone != null) onDone();
