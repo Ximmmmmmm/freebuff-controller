@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.8.20.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.20.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.21.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.21.0")]
 
 namespace FreebuffController
 {
@@ -3655,6 +3655,15 @@ namespace FreebuffController
                     // failure a MessageBox (via -EncodedCommand: no codepage
                     // or quoting hazards in a .cmd) tells the user where the
                     // staged exe was kept.
+                    //
+                    // 延时一律用 ping，不用 timeout：本进程是 GUI（winexe），
+                    // 脚本以 CreateNoWindow 启动、拿不到可用的控制台输入，
+                    // `timeout /t N` 会在 0.02 秒内直接返回 rc=125（实测），
+                    // 于是「等父进程退出 + 重试 60 次×1 秒」实际在零点几秒内跑完，
+                    // 旧进程还没退利索 / 杀软还在扫新 exe 时就报「替换失败」。
+                    // ping 在同样环境下确实会等（实测 2 秒）。
+                    string wait1 = "ping -n 2 127.0.0.1 >nul";  // ≈1 秒
+                    string wait2 = "ping -n 3 127.0.0.1 >nul";  // ≈2 秒
                     string psFail = "Add-Type -AssemblyName System.Windows.Forms; " +
                         "[System.Windows.Forms.MessageBox]::Show('" +
                         "控制器自更新替换失败：新版本已保留在 " + staged.Replace("'", "''") +
@@ -3664,15 +3673,15 @@ namespace FreebuffController
                     string script = SelfUpdateScriptPath();
                     File.WriteAllText(script,
                         "@echo off\r\n" +
-                        "timeout /t 2 /nobreak >nul\r\n" +
+                        wait2 + "\r\n" +
                         ":wait\r\n" +
                         "tasklist /fi \"pid eq " + Process.GetCurrentProcess().Id + "\" | find \" " + Process.GetCurrentProcess().Id + " \" >nul 2>nul\r\n" +
-                        "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n" +
+                        "if not errorlevel 1 (" + wait1 + " & goto wait)\r\n" +
                         "set /a tries=0\r\n" +
                         ":move\r\n" +
                         "move /y \"" + staged + "\" \"" + exePath + "\" >nul 2>nul\r\n" +
                         "if not errorlevel 1 goto moved\r\n" +
-                        "timeout /t 1 /nobreak >nul\r\n" +
+                        wait1 + "\r\n" +
                         "set /a tries+=1\r\n" +
                         "if %tries% lss 60 goto move\r\n" +
                         "start \"\" powershell -NoProfile -WindowStyle Hidden -EncodedCommand " + psEncoded + "\r\n" +
