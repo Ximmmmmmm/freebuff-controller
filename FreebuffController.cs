@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.8.21.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.21.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.22.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.22.0")]
 
 namespace FreebuffController
 {
@@ -421,6 +421,7 @@ namespace FreebuffController
             proxyTimer.Start();
 
             ComputeAndApply();
+            ShowSelfUpdateNotice();
             FetchQuotasAsync(true, false); // 启动那次不报「额度已刷新」（见 announce）
             DetectProxyAsync();
             CheckVersionAsync();
@@ -3671,6 +3672,18 @@ namespace FreebuffController
                     string psEncoded = Convert.ToBase64String(
                         System.Text.Encoding.Unicode.GetBytes(psFail));
                     string script = SelfUpdateScriptPath();
+                    // ① 把旧 exe 留一份 .bak-v<旧版>.exe（只留一份、幂等覆盖，新版出问题
+                    //   可回滚）——必须放在 move **之前**：move /y 会把旧 exe 吞掉，之后
+                    //   就没有旧内容可备份了。锁着的 exe 可以 copy（不能删/覆盖），
+                    //   所以放在重试循环里、每次 move 前幂等 copy 一次。
+                    // ② 写 updated-to.txt（两行：第 1 行新版本号，第 2 行备份文件名），
+                    //   重启后的控制器读到它就把「已升级到 vX ✓」浮到状态行并删掉标记。
+                    //   备份名要单独一行带过去：备份是按**旧**版本号命名的，读标记的
+                    //   新实例只知道新版本号，自己拼不出旧版文件名。
+                    //   都放在 :moved 分支——只有真替换成功才写；失败路径什么都不动，
+                    //   只弹回滚指引。
+                    string backup = SelfBackupName();
+                    string mark = SelfUpdatedMarkPath();
                     File.WriteAllText(script,
                         "@echo off\r\n" +
                         wait2 + "\r\n" +
@@ -3679,6 +3692,10 @@ namespace FreebuffController
                         "if not errorlevel 1 (" + wait1 + " & goto wait)\r\n" +
                         "set /a tries=0\r\n" +
                         ":move\r\n" +
+                        // 备份必须在 move 之前：move /y 会把旧 exe 吞掉，之后就没有
+                        // 「旧内容」可备份了。锁着的 exe 可以 copy（不能删/覆盖），
+                        // 所以放在重试循环里、每次 move 前幂等 copy 一次。
+                        "copy /y \"" + exePath + "\" \"" + backup + "\" >nul 2>nul\r\n" +
                         "move /y \"" + staged + "\" \"" + exePath + "\" >nul 2>nul\r\n" +
                         "if not errorlevel 1 goto moved\r\n" +
                         wait1 + "\r\n" +
@@ -3687,6 +3704,8 @@ namespace FreebuffController
                         "start \"\" powershell -NoProfile -WindowStyle Hidden -EncodedCommand " + psEncoded + "\r\n" +
                         "exit /b 1\r\n" +
                         ":moved\r\n" +
+                        "echo " + ver + ">\"" + mark + "\"\r\n" +
+                        "echo " + Path.GetFileName(backup) + ">>\"" + mark + "\"\r\n" +
                         "start \"\" \"" + exePath + "\"\r\n" +
                         "del \"%~f0\"\r\n",
                         new System.Text.UTF8Encoding(false));
@@ -3723,6 +3742,62 @@ namespace FreebuffController
         {
             string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
             return Path.Combine(exeDir, "self-update.cmd");
+        }
+
+        // ---------- 自更新的成功回执与旧版备份 ----------
+
+        // 替换脚本成功后写的回执：一行 = 新版本号。重启后读出、展示、删除。
+        // 放 exe 旁边（与脚本同目录），删脚本时一起清场，不会留下孤儿文件。
+        private static string SelfUpdatedMarkPath()
+        {
+            string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
+            return Path.Combine(exeDir, "updated-to.txt");
+        }
+
+        // 启动时：上一次自更新若已替换成功，这里兑现承诺——浮一句「已升级到 vX ✓」。
+        // 标记两行：第 1 行新版本号，第 2 行备份文件名（老格式只有版本号也认）。
+        // 版本与实际运行的对得上才报（手工改名 / 别的来源写进来的脏标记不认），
+        // 备份文件真的存在才提（备份那步 copy 是静默的，可能不在），
+        // 报完即删，同一次启动里不会重复出现。
+        private void ShowSelfUpdateNotice()
+        {
+            string mark = SelfUpdatedMarkPath();
+            if (!File.Exists(mark)) return;
+            string ver = null, bakName = null;
+            try
+            {
+                string[] lines = File.ReadAllLines(mark, System.Text.Encoding.UTF8);
+                if (lines.Length > 0) ver = lines[0].Trim();
+                if (lines.Length > 1) bakName = lines[1].Trim();
+            }
+            catch { }
+            try { File.Delete(mark); } catch { }
+            if (string.IsNullOrEmpty(ver)) return;
+            var cur = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+            var v = ParseLooseVersion(ver);
+            if (v == null || cur == null || v.CompareTo(cur) != 0) return;
+            string bak = null;
+            if (!string.IsNullOrEmpty(bakName))
+            {
+                string bakPath = Path.Combine(
+                    Path.GetDirectoryName(Application.ExecutablePath), bakName);
+                if (File.Exists(bakPath)) bak = bakName;
+            }
+            ShowStatusAfterIdle("已升级到 v" + ver + " ✓" +
+                (bak != null ? "（旧版已备份为 " + bak + "）" : ""));
+        }
+
+        // 算出旧 exe 的备份文件名（.bak-v<旧版本>.exe，只留一份），嵌进替换脚本：
+        // 实际的 copy /y 由脚本在**每次 move 之前**幂等执行——锁着的 exe 可以 copy
+        // （不能删/覆盖），move 成功后旧 exe 就没了，这份备份是唯一的回滚凭据。
+        // 名字里带旧版本号，所以只能在这里（父进程还活着）算，脚本自己拼不出来。
+        private static string SelfBackupName()
+        {
+            string exePath = Application.ExecutablePath;
+            string dir = Path.GetDirectoryName(exePath);
+            string name = Path.GetFileNameWithoutExtension(exePath);
+            return Path.Combine(dir, name + ".bak-v" +
+                System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString(3) + ".exe");
         }
 
         // Returns the fetched pack version, or null when there is nothing
