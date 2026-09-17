@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.8.22.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.22.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.23.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.23.0")]
 
 namespace FreebuffController
 {
@@ -202,7 +202,18 @@ namespace FreebuffController
         private DateTime hanhuaBuildStableAt; // 首次看到该指纹的时刻
         private string hanhuaBuildHandled;    // 已交给 StartAutoRestoreHanhua 的指纹
         private const double HanhuaBuildSettleSeconds = 8;
-        private int hanhuaBusy;
+        // 静态：换文件与「把汉化包写进 output/」必须互斥，而后者在静态方法
+        // FetchAndStageLatestPack 里（它看不到实例字段）。全进程只有一个主窗口，
+        // 语义上也是全局状态。
+        private static int hanhuaBusy;
+        // 因**临时**原因被拒的自动应用（有实例在跑 / 另一路正往 output/ 里写）：留一条待办，
+        // 每 HanhuaRetrySeconds 秒在 3 秒轮询里再试一次，直到换上或理由变成永久的。
+        // 没有它的话，「本地构建完成时你正在用 Freebuff」——最常见的情形——会一直等到别的
+        // 触发点：实测踩过，控制器启动那次被同批的汉化包检查吞掉，3 秒轮询那次刚够 8 秒稳定
+        // 判定时用户已经打开了应用，于是那份构建被标成「已处理」，之后再没有人试。
+        private string hanhuaPendingWhy;
+        private DateTime hanhuaRetryAt;
+        private const double HanhuaRetrySeconds = 10;
         // 自动应用汉化是默认行为，没有开关：Freebuff 的自动更新会把 app.asar 与 ui/
         // 换回英文原版，控制器自己换回中文；拉到适配本版本的新汉化包也直接换上。
         // 旧版留下的两个汉化偏好文件：「还原英文」的停手标记、以及自动应用开关
@@ -425,13 +436,19 @@ namespace FreebuffController
             FetchQuotasAsync(true, false); // 启动那次不报「额度已刷新」（见 announce）
             DetectProxyAsync();
             CheckVersionAsync();
-            CheckPackUpdateAsync();
-            CheckSelfUpdateAsync();
             // 启动时也补一次：控制器多半是「Freebuff 刚更新完、汉化被覆盖回英文」时才被
             // 打开的，而构造函数把 hanhuaRecheckVersion 预置成了当前版本，3 秒轮询不会
             // 因「版本没变」触发（那是给运行期间更新的场景留的）。有实例在跑 / 版本不
-            // 匹配会自己跳过，见 StartAutoRestoreHanhua。
+            // 匹配会自己跳过（跳过会留下待办，几秒后在 3 秒轮询里重试），见
+            // StartAutoRestoreHanhua。
+            //
+            // 位置在 CheckPackUpdateAsync **之前**：那个函数一进来就把 packBusy 置 1
+            // （网络检查在后台跑），而自动应用见到有人正忙会直接放行不接手——写成先调它
+            // 的话，启动这次恢复几乎恒被吞掉（实测踩过：控制器起来时明明有可用构建，
+            // 却什么都没换，界面一直停在英文）。
             StartAutoRestoreHanhua("控制器启动", null);
+            CheckPackUpdateAsync();
+            CheckSelfUpdateAsync();
         }
 
         // 常态下没有常驻文案：底部那几行已经不显示了，这里只是把「当前无事件」
@@ -846,6 +863,23 @@ namespace FreebuffController
             }
         }
 
+        // 「你正在用的实例」：主进程与各 slot 的顶层进程。Electron 的子孙进程
+        // （--type=renderer / gpu-process / utility / crashpad-handler…）不算：它们随主进程
+        // 一起生灭，而**残留的子进程**被当成实例会让自动应用永远等下去——IsOwnFreebuffProcess
+        // 只看 exe 路径，而安装目录里每个进程的 exe 路径都一模一样。
+        //
+        // 读不到命令行时按「算实例」处理（宁可推迟换文件，也别在应用跑着的时候去动它）：
+        // 旧写法把这类进程静默忽略掉，等于 _不知道_ 就放行。
+        private static bool IsInstanceProcess(ManagementObject process)
+        {
+            if (!IsOwnFreebuffProcess(process)) return false;
+            string cl;
+            try { cl = process["CommandLine"] as string; }
+            catch { return true; }
+            if (string.IsNullOrEmpty(cl)) return true;
+            return cl.IndexOf("--type=", StringComparison.Ordinal) < 0;
+        }
+
         private static HashSet<int> QueryRunning(out bool mainRunning)
         {
             var slots = new HashSet<int>();
@@ -857,10 +891,10 @@ namespace FreebuffController
                 {
                     foreach (ManagementObject o in searcher.Get())
                     {
-                        if (!IsOwnFreebuffProcess(o)) continue;
+                        if (!IsInstanceProcess(o)) continue;
+                        // 命令行读不到（IsInstanceProcess 已经把它当实例）：算主进程在跑。
                         string cl = o["CommandLine"] as string;
-                        if (string.IsNullOrEmpty(cl)) continue;
-                        Match m = SlotRegex.Match(cl);
+                        Match m = string.IsNullOrEmpty(cl) ? Match.Empty : SlotRegex.Match(cl);
                         if (m.Success)
                         {
                             int n;
@@ -2199,6 +2233,9 @@ namespace FreebuffController
                         // 本地刚重新构建出 output/ 也要自己认出来（README 承诺的第三个
                         // 时机：不点「启动」、控制器也没重启时照样换上）。
                         DetectFreshLocalBuild();
+                        // 上次被「有实例在跑 / 正在往 output/ 写」拒掉的自动应用：实例一退出
+                        // 就换上，不必等别的触发点（用户关掉 Freebuff 后十秒内即生效）。
+                        TryPendingHanhuaRestore();
                     });
                 }
                 catch { }
@@ -2280,7 +2317,7 @@ namespace FreebuffController
             // 启动前先自动恢复汉化：进程一起来 resources 就被占用，只能等下次。
             // 需要换文件时先换完再拉进程（换完的回调里接着 LaunchIndexNow），用户
             // 从「启动」进去看到的就是中文；不需要换就是同步直通，不多一次延迟。
-            if (StartAutoRestoreHanhua("启动前", delegate { LaunchIndexNow(rowIndex); })) return;
+            if (StartAutoRestoreHanhua("启动前", delegate { LaunchIndexNow(rowIndex); }) == RestoreOutcome.Started) return;
             LaunchIndexNow(rowIndex);
         }
 
@@ -3307,6 +3344,13 @@ namespace FreebuffController
             }
         }
 
+        // 汉化包正在被写进 output/（暂存阶段）。自动应用读 output/、暂存写 output/，
+        // 两者必须互斥；但「正在检查更新」本身（网络请求 + 下载 + 解压到临时目录）
+        // 不碰 output/，不能拿它当理由挡住自动应用——旧代码用 packBusy 挡，于是启动时
+        // 那次自动恢复恒被同批的 pack 检查吞掉。
+        private static int packStaging;
+        private const int PackStagingWaitMs = 15000;
+
         // ---------- 汉化包更新 (pack update) ----------
         // The pack is distributed as a GitHub Release: a zip of output/ plus
         // a pack-manifest.json asset (packVersion / targetVersion / asset /
@@ -3884,13 +3928,41 @@ namespace FreebuffController
 
             // Stage exactly where auto-apply already looks — output/ stays the
             // single install source, local builds and fetched packs alike.
+            //
+            // output/ 是唯一的安装源：自动应用可能正读它（换文件通常不到一秒），
+            // 这时不能往里写，否则两边都可能拿到半份。等它读完再暂存；等不到就放弃
+            // 这一轮——临时文件照删，30 分钟后的例行检查会重来，不冒半新半旧的风险。
             if (progress != null) progress("暂存", 0, 0);
-            string output = Path.Combine(hanhuaDir, "output");
-            Directory.CreateDirectory(output);
-            File.Copy(stagedApp, Path.Combine(output, "app.asar"), true);
-            string outUi = Path.Combine(output, "ui");
-            if (Directory.Exists(outUi)) Directory.Delete(outUi, true);
-            CopyDir(stagedUi, outUi);
+            // 先占住「我要写 output/」，再等正在换文件的那一轮读完。顺序不能反：
+            // 先等再占会出现「等到了、正要写，另一路又开始读」的窗口。
+            Interlocked.Exchange(ref packStaging, 1);
+            try
+            {
+                for (int i = 0; i < PackStagingWaitMs / 250; i++)
+                {
+                    if (Interlocked.CompareExchange(ref hanhuaBusy, 0, 0) == 0) break;
+                    Thread.Sleep(250);
+                }
+                if (Interlocked.CompareExchange(ref hanhuaBusy, 0, 0) != 0)
+                {
+                    // 装机正忙：这一轮不暂存，也不报错（例行检查会重来），
+                    // 不冒「读到半份 output/」的风险。
+                    try
+                    {
+                        File.Delete(dest);
+                        Directory.Delete(extractDir, true);
+                    }
+                    catch { }
+                    return null;
+                }
+                string output = Path.Combine(hanhuaDir, "output");
+                Directory.CreateDirectory(output);
+                File.Copy(stagedApp, Path.Combine(output, "app.asar"), true);
+                string outUi = Path.Combine(output, "ui");
+                if (Directory.Exists(outUi)) Directory.Delete(outUi, true);
+                CopyDir(stagedUi, outUi);
+            }
+            finally { Interlocked.Exchange(ref packStaging, 0); }
 
             // The staged copy is the source of truth now — the temp zip and
             // unpack dir have served their purpose.
@@ -4349,32 +4421,56 @@ namespace FreebuffController
             if ((DateTime.UtcNow - hanhuaBuildStableAt).TotalSeconds < HanhuaBuildSettleSeconds) return;
             hanhuaBuildHandled = stamp;
             // 该不该换由 StartAutoRestoreHanhua 自己判断：装机已是同版本汉化、有实例在跑、
-            // 版本对不上都会直接跳过。同一指纹只试一次，不必每 3 秒重读一遍产物。
+            // 版本对不上都会跳过。同一指纹只试一次，不必每 3 秒重读一遍产物——被**临时**
+            // 原因拒了也不丢：函数内部会记下待办，几秒后由 TryPendingHanhuaRestore 接手
+            // （以前标完就没人再管，于是「构建完成时正用着 Freebuff」等于白构建）。
             StartAutoRestoreHanhua("检测到新构建", null);
         }
 
+        // 自动应用的结果：调用方靠它区分「已经开始换文件」与「为什么没换」。关键在**临时**
+        // 与**永久**之分——临时原因（有实例在跑 / 另一路正往 output/ 里写）会被记成待办、
+        // 过几秒自动重试，而永久原因（版本对不上 / 没什么可换）不该反复试。
+        private enum RestoreOutcome
+        {
+            Started,          // 已在后台开始换文件（完成后回调 onDone）
+            NothingToDo,      // 装机已是同版本汉化，且 output/ 里没有更新的包
+            NoBuild,          // 找不到汉化仓库，或 output/ 里没有可用构建
+            VersionMismatch,  // 构建的 targetVersion 与装机版本对不上
+            Busy,             // 正在换文件 / 正在把汉化包写进 output/
+            InstancesRunning  // 有实例在跑，不抢文件
+        }
+
+        private static bool RestoreIsTransient(RestoreOutcome o)
+        {
+            return o == RestoreOutcome.Busy || o == RestoreOutcome.InstancesRunning;
+        }
+
         // 汉化的自动应用：装机版本变化 / 启动实例前 / 刚拉到（或刚构建出）新包时。
-        // 返回 true = 已在后台开始换文件，完成后回调 onDone（启动流程靠它接着拉
+        // 返回 Started = 已在后台开始换文件，完成后回调 onDone（启动流程靠它接着拉
         // 进程；其余调用传 null）。
         //
         // 只在「确定该换、也能安全换」时动手，其余一律放行给现有流程：
         //   · 装机已是汉化版且 output/ 里没有更新的包 → 没什么可换；有更新的包
         //     （同一 Freebuff 版本的修正重发 v0.0.103.1 这类）就自动换上，不等点击；
-        //   · 正在应用或正在下载汉化包 → 让现有流程跑完；
+        //   · 正在换文件 / 正在把汉化包写进 output/ → 让现有流程跑完，待办重试；
         //   · 找不到汉化仓库 / output/ 里没有构建 → 静默跳过（要动手得自己构建）；
         //   · 构建的 targetVersion 与装机版本对不上 → 装了会引用不存在的 bundle，跳过；
-        //   · 有实例正在运行 → 不抢文件（换文件会打断任务），等下次触发。
-        private bool StartAutoRestoreHanhua(string why, Action onDone)
+        //   · 有实例正在运行 → 不抢文件（换文件会打断任务），**留下待办**，实例一退出就换。
+        private RestoreOutcome StartAutoRestoreHanhua(string why, Action onDone)
         {
             // 装机是英文（Freebuff 更新刚覆盖过）→ 恢复；装机已是中文但 output/ 里
             // 有更新的包 → 升级换上。两者都不成立就不必介入。
             bool wasApplied = HanhuaApplied();
-            if (wasApplied && !PendingPackIsNewer()) return false;
-            if (Interlocked.CompareExchange(ref hanhuaBusy, 1, 0) != 0) return false;
-            if (Interlocked.CompareExchange(ref packBusy, 0, 0) == 1)
+            if (wasApplied && !PendingPackIsNewer()) return RestoreOutcome.NothingToDo;
+            if (Interlocked.CompareExchange(ref hanhuaBusy, 1, 0) != 0)
+                return ScheduleHanhuaRetry(why, RestoreOutcome.Busy);
+            // 冲突判定只看「有人正往 output/ 里写」（暂存阶段），不看整段网络检查：
+            // 以前这里判的是 packBusy，而它从检查开始就一直是 1，于是启动时那次自动
+            // 恢复恒被同批的 pack 检查吞掉（详见 BuildUi 里的注释）。
+            if (Interlocked.CompareExchange(ref packStaging, 0, 0) == 1)
             {
                 Interlocked.Exchange(ref hanhuaBusy, 0);
-                return false;
+                return ScheduleHanhuaRetry(why, RestoreOutcome.Busy);
             }
             string build = IsValidHanhuaDir(hanhuaDir) ? HanhuaBuildDir(hanhuaDir) : null;
             string tv = build == null
@@ -4383,15 +4479,17 @@ namespace FreebuffController
             if (build == null || !PackTargetsInstalled(tv, installedVersion))
             {
                 Interlocked.Exchange(ref hanhuaBusy, 0);
-                return false;
+                ClearHanhuaRetry();
+                return build == null ? RestoreOutcome.NoBuild : RestoreOutcome.VersionMismatch;
             }
             bool mainRunning;
             HashSet<int> slots = QueryRunning(out mainRunning);
             if (mainRunning || slots.Count > 0)
             {
                 Interlocked.Exchange(ref hanhuaBusy, 0);
-                return false;
+                return ScheduleHanhuaRetry(why, RestoreOutcome.InstancesRunning);
             }
+            ClearHanhuaRetry();
             SetStatus((wasApplied
                 ? "检测到新汉化包 · 正在自动应用…（"
                 : "检测到汉化未应用 · 正在自动恢复…（") + why + "）");
@@ -4416,7 +4514,7 @@ namespace FreebuffController
                             ? "已自动应用新汉化包 ✓ 下次打开 Freebuff 就是新版中文。"
                             : "已自动恢复汉化 ✓ 下次打开 Freebuff 就是中文。")
                         : (wasApplied ? "自动应用汉化包失败：" : "自动恢复汉化失败：")
-                          + HanhuaErrorText(error) + "（下次启动 Freebuff 时会再试）";
+                          + HanhuaErrorText(error) + "（等下次自动应用或重启控制器）";
                     SetStatus(result, error == null ? ColGreen : ColNewVersion);
                     // 换文件失败（权限 / 文件被占用）以前只在底部那行闪一句，
                     // 现在那里没有了，失败必须用气泡推出来。
@@ -4427,7 +4525,35 @@ namespace FreebuffController
                     DrainHanhuaWaiters();
                 });
             });
-            return true;
+            return RestoreOutcome.Started;
+        }
+
+        // 临时原因被拒：记下待办 + 退避时刻，3 秒轮询里的 TryPendingHanhuaRestore 会接手。
+        // 状态栏只在「刚进入待办」时补一句（每 10 秒刷一次没意义）；真正的常驻指示是
+        // 汉化状态那行「汉化 ✗ 待自动应用」，由 RefreshHanhuaUi 负责。
+        private RestoreOutcome ScheduleHanhuaRetry(string why, RestoreOutcome outcome)
+        {
+            bool wasPending = hanhuaPendingWhy != null;
+            hanhuaPendingWhy = why;
+            hanhuaRetryAt = DateTime.UtcNow.AddSeconds(HanhuaRetrySeconds);
+            if (!wasPending && outcome == RestoreOutcome.InstancesRunning)
+                SetStatus("汉化待自动应用 · 关掉所有 Freebuff 实例后自动换上。", ColGreen);
+            return outcome;
+        }
+
+        private void ClearHanhuaRetry()
+        {
+            hanhuaPendingWhy = null;
+        }
+
+        // 待办重试：实例退出 / 暂存结束之后自动把汉化换上，不必再等别的触发点。
+        // 退避由 ScheduleHanhuaRetry 重新计时（临时原因才能走到这里）。
+        private void TryPendingHanhuaRestore()
+        {
+            string why = hanhuaPendingWhy;
+            if (why == null) return;
+            if (DateTime.UtcNow < hanhuaRetryAt) return;
+            if (!RestoreIsTransient(StartAutoRestoreHanhua(why, null))) hanhuaPendingWhy = null;
         }
 
         // ---------- Freebuff 更新器缓存 (electron-updater cache) ----------
