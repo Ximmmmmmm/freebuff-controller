@@ -1,4 +1,6 @@
 # 控制器编译冒烟：系统自带 csc（C# 5）+ 全部引用，防止语法/引用回归。
+# 编译之后再跑 --self-test：换文件那条路径（临时目录 → 校验 → 换位 → 回滚）最容易出事、
+# 又最难手工复现（要装机目录、实例全关、还要恰好断在拷一半），用假树把它钉住。
 name: build
 
 on:
@@ -16,3 +18,12 @@ jobs:
       - name: 编译冒烟（build.bat，失败退出码会传播）
         shell: cmd
         run: call build.bat
+      - name: 换文件逻辑自测（--self-test，退出码非 0 即失败）
+        shell: cmd
+        run: |
+          FreebuffController.exe --self-test "%TEMP%\selftest.txt"
+          if errorlevel 1 (
+            type "%TEMP%\selftest.txt"
+            exit /b 1
+          )
+          type "%TEMP%\selftest.txt"

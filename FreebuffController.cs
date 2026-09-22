@@ -20,8 +20,8 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyVersion("1.8.23.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.23.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.25.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.25.0")]
 
 namespace FreebuffController
 {
@@ -29,22 +29,163 @@ namespace FreebuffController
     {
         internal static Mutex SingleMutex;
 
+        // 单实例判定沿用老互斥体名字：换新名字会让旧版实例「看不见」本实例，
+        // 两个控制器同时跑起来比弹一次框糟得多。Show / Ack 是配套的「把窗口
+        // 叫到前台」通道；旧版没有这两个事件，次级实例探测不到就退回弹框。
+        private const string SingleInstanceName = "FreebuffMultiOpenController";
+        private const string ShowEventName = "FreebuffMultiOpenController.Show";
+        private const string AckEventName = "FreebuffMultiOpenController.Ack";
+
+        internal static EventWaitHandle ShowSignal;  // 主实例监听：次级请求「把窗口叫出来」
+        internal static EventWaitHandle AckSignal;   // 主实例回执：请求收到了
+        // 允许别的进程抢前台的资格（ASFW_ANY）。放这里是因为 P/Invoke 与它同段。
+        internal const int AsfwAny = -1;
+
         [DllImport("user32.dll")]
         private static extern bool SetProcessDPIAware();
+        // 前台相关的那几发都放这里（Program）：主实例与次级实例都要用，而两个
+        // 类里各声明一份 extern 只会让人以后改错地方。
+        [DllImport("user32.dll")]
+        internal static extern bool SetForegroundWindow(IntPtr hwnd);
+        [DllImport("user32.dll")]
+        internal static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")]
+        internal static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
+        internal const int SW_RESTORE = 9;
+        // 把窗口提到最前，走的是 Alt+Tab 那条路，不受前台锁限制（user32 未文档化但
+        // 自 XP 起一直在）。调不到会抛，调用点自己兜。
+        [DllImport("user32.dll")]
+        internal static extern void SwitchToThisWindow(IntPtr hwnd, bool fUnknown);
+        // 把「允许抢前台」的资格让给别的进程；前台锁只对收到最近一次输入的进程放行。
+        [DllImport("user32.dll")]
+        internal static extern bool AllowSetForegroundWindow(int dwProcessId);
+        [DllImport("user32.dll")]
+        internal static extern uint GetWindowThreadProcessId(IntPtr hwnd, IntPtr pid);
+        [DllImport("kernel32.dll")]
+        internal static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")]
+        internal static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+        [DllImport("user32.dll")]
+        internal static extern bool BringWindowToTop(IntPtr hwnd);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowTextW(IntPtr hwnd, System.Text.StringBuilder text, int max);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClassNameW(IntPtr hwnd, System.Text.StringBuilder text, int max);
+
+        // 「谁抢到了前台」——失败时把它记进日志，别靠猜（前台锁的行为在不同场景
+        // 下差异很大：托盘双击能过、从后台进程起的第二次双击常常不能）。
+        internal static string DescribeForegroundWindow()
+        {
+            try
+            {
+                IntPtr h = GetForegroundWindow();
+                if (h == IntPtr.Zero) return "（没有前台窗口）";
+                var title = new System.Text.StringBuilder(256);
+                GetWindowTextW(h, title, title.Capacity);
+                var cls = new System.Text.StringBuilder(256);
+                GetClassNameW(h, cls, cls.Capacity);
+                uint pid = GetWindowThreadProcessId(h, IntPtr.Zero);
+                return "hwnd=" + h + " class=" + cls + " title=" + title + " tid=" + pid;
+            }
+            catch (Exception ex) { return "（读不出来：" + ex.Message + "）"; }
+        }
+
+        // 前台锁的最后一条退路：把自己的输入队列临时挂到**当前前台窗口所在的线程**上，
+        // 这样「最近一次输入」的判定就落到自己头上，SetForegroundWindow 才有权生效。
+        // 实测（single-instance-check）光靠 AllowSetForegroundWindow 会时而成功时而
+        // 被拒（后者只闪一下任务栏），而这条舞蹈在两种情况下都过得去。
+        // 必须保证解挂：挂上去没解开会让两个线程共享输入状态，很难查。
+        internal static bool ForceForeground(IntPtr hwnd)
+        {
+            IntPtr fg = GetForegroundWindow();
+            uint fgThread = (fg == IntPtr.Zero) ? 0 : GetWindowThreadProcessId(fg, IntPtr.Zero);
+            uint myThread = GetCurrentThreadId();
+            bool attached = false;
+            try
+            {
+                if (fgThread != 0 && fgThread != myThread)
+                    attached = AttachThreadInput(myThread, fgThread, true);
+                ShowWindow(hwnd, SW_RESTORE);
+                BringWindowToTop(hwnd);
+                SetForegroundWindow(hwnd);
+                return GetForegroundWindow() == hwnd;
+            }
+            catch { return false; }
+            finally
+            {
+                if (attached)
+                {
+                    try { AttachThreadInput(myThread, fgThread, false); } catch { }
+                }
+            }
+        }
+
+        // ---------- 失败日志 ----------
+        // 这个工具通篇是「静默失败不拦流程」（全文件 77 处 catch { }）：好处是从不因为
+        // 边角异常崩掉，代价是出事时没有任何现场——「双击了没反应」「汉化没换上」这类
+        // 只能靠翻代码复现。这里只做一件事：把**关键路径**的失败记一行到
+        // %TEMP%\freebuff-controller-log.txt（超过 1 MB 先清空），不打扰用户、不进界面，
+        // 只让下一次排查有据可查。
+        internal static readonly string FailLogPath =
+            Path.Combine(Path.GetTempPath(), "freebuff-controller-log.txt");
+        private const long FailLogMaxBytes = 1024 * 1024;
+        // 自测期间静音：--self-test 会故意造畸形夹具（缺资源、半截源目录），那些
+        // 被预期路径上的 LogFail 会把用户日志刷进无意义的假象数据。报告文件本身
+        // 就是自测的输出通道，不需要借日志。
+        internal static bool FailLogMuted;
+
+        internal static void LogFail(string what)
+        {
+            LogFail(what, null);
+        }
+
+        internal static void LogFail(string what, Exception ex)
+        {
+            if (FailLogMuted) return;
+            try
+            {
+                var fi = new FileInfo(FailLogPath);
+                if (fi.Exists && fi.Length > FailLogMaxBytes) fi.Delete();
+                File.AppendAllText(FailLogPath,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + what
+                    + (ex == null ? "" : "  ← " + ex.GetType().Name + ": " + ex.Message)
+                    + Environment.NewLine,
+                    new System.Text.UTF8Encoding(false));
+            }
+            catch { } // 连日志都写不了（磁盘满 / 只读）就没别的办法了：绝不因此打断流程
+        }
 
         [STAThread]
-        private static void Main()
+        private static void Main(string[] args)
         {
+            // 自测入口：不建窗口、不碰装机目录，只在 %TEMP% 里的假树上跑。
+            // 报告写到命令行给的路径（winexe 没有 stdout），退出码 0 = 全过。
+            if (args != null && args.Length >= 1 && args[0] == "--self-test")
+            {
+                Environment.Exit(MainForm.RunSelfTest(args.Length >= 2 ? args[1] : null));
+                return;
+            }
             SetProcessDPIAware();
 
             bool createdNew;
-            SingleMutex = new Mutex(true, "FreebuffMultiOpenController", out createdNew);
+            SingleMutex = new Mutex(true, SingleInstanceName, out createdNew);
             if (!createdNew)
             {
-                MessageBox.Show("Freebuff 多开控制器已经在运行了。", "提示",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                // 已经有一个控制器在跑。用户双击快捷方式要的是「看见那个窗口」，
+                // 不是一句「已经在运行了」：先请它把窗口提到前台，成功就安静退出，
+                // 没人应答（旧版 / 主实例卡住 / 正在退出）才弹框说明是谁占着。
+                if (TryRequestShow()) return;
+                ShowAlreadyRunningDialog();
                 return;
             }
+
+            // 两个事件在互斥体之后立刻建好；次级实例探测不到它们只会多等一次重试。
+            // 建之前先各自 Set 一次再 WaitOne(0) 排空：旧一次运行留下的信号状态不该
+            // 被这一次读成「已经有人请求过」。（AutoReset + 全局命名事件，跨进程可见。）
+            ShowSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+            AckSignal = new EventWaitHandle(false, EventResetMode.AutoReset, AckEventName);
+            ShowSignal.Reset();
+            AckSignal.Reset();
 
             // 默认回复中文：启动时确保 ~/.AGENTS.md 语言规则存在
             // （Freebuff orchestrator 每次新会话都会把它并入系统提示词，
@@ -73,7 +214,9 @@ namespace FreebuffController
             };
             try
             {
-                Application.Run(new MainForm());
+                MainForm form = new MainForm();
+                StartShowListener(form);
+                Application.Run(form);
             }
             catch (Exception ex)
             {
@@ -90,6 +233,157 @@ namespace FreebuffController
 
             try { SingleMutex.ReleaseMutex(); } catch { }
         }
+
+        // 次级实例：请已运行的那个控制器把窗口叫到前台。true = 它收到了请求
+        // （本实例可以安静退出）；false = 没人应答，交给调用方弹框说明。
+        //
+        // 两处「看不见的失败」在这里堵上：
+        //   · 抢前台的**资格**问题。SetForegroundWindow 只对「收到最近一次输入」的进程
+        //     生效，而那个进程是刚被双击启动的**本实例**（由 Explorer 起）。所以先把
+        //     这份资格让渡出去（AllowSetForegroundWindow），主实例那一发才真跳到眼前；
+        //     不给的话它只能闪一下任务栏——README 承诺的「埋在后面也能叫回来」在最需要
+        //     它的那种情况下恰好不成立。
+        //   · Ack 的事件残留。它是 AutoReset 且没人排空：上一次请求超时之后才落下的
+        //     回执会留在事件里，让**下一次**双击一 WaitOne 就立刻命中、误判「有人应答」，
+        //     于是本实例安静退出，而主实例那次可能还卡着——用户双击后彻底没反应，连兜底
+        //     弹框都不会出现（它只在真超时才弹）。所以发请求前先清一次。
+        private static bool TryRequestShow()
+        {
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    using (EventWaitHandle ack = EventWaitHandle.OpenExisting(AckEventName))
+                    using (EventWaitHandle show = EventWaitHandle.OpenExisting(ShowEventName))
+                    {
+                        ack.WaitOne(0); // 排空上一次留下的陈旧回执（见上）
+                        try { AllowSetForegroundWindow(AsfwAny); } catch { } // 同 Program 内的 extern
+                        show.Set();
+                        if (ack.WaitOne(600))
+                        {
+                            // 主实例已受理。它自己那一发若被前台锁挡下，就由本实例补一发
+                            // ——资格还在我们手上（用户刚点的就是这个进程）。
+                            RaiseOtherControllerWindow();
+                            return true;
+                        }
+                    }
+                }
+                catch (Exception) { } // 事件不存在（旧版控制器）或权限不足：再试一次
+                Thread.Sleep(200);
+            }
+            return false;
+        }
+
+        // 主实例那个窗口的句柄。用 Process.MainWindowHandle 而不是自己 EnumWindows：
+        // 跨进程一样拿得到，也不必再引一堆 user32。
+        private static IntPtr FindOtherControllerWindow()
+        {
+            int mine = 0;
+            try { mine = Process.GetCurrentProcess().Id; }
+            catch { return IntPtr.Zero; }
+            try
+            {
+                foreach (Process p in Process.GetProcessesByName("FreebuffController"))
+                {
+                    try
+                    {
+                        if (p.Id != mine)
+                        {
+                            IntPtr h = p.MainWindowHandle;
+                            if (h != IntPtr.Zero) return h;
+                        }
+                    }
+                    catch { } // 句柄/权限读不到：换下一个
+                    finally { try { p.Dispose(); } catch { } }
+                }
+            }
+            catch { }
+            return IntPtr.Zero;
+        }
+
+        // 由「刚被用户启动的」本实例去提主实例的窗口——它手上有抢前台的资格。
+        // 主实例那边是先 BeginInvoke 再回执，所以这里给它几帧时间把窗口 Show 出来。
+        private static void RaiseOtherControllerWindow()
+        {
+            try
+            {
+                IntPtr hwnd = FindOtherControllerWindow();
+                if (hwnd == IntPtr.Zero) return;
+                for (int i = 0; i < 12; i++)
+                {
+                    if (GetForegroundWindow() == hwnd) return;
+                    try { ShowWindow(hwnd, SW_RESTORE); } catch { }
+                    try { SetForegroundWindow(hwnd); } catch { }
+                    if (GetForegroundWindow() == hwnd) return;
+                    // 被前台锁挡下就上那条硬退路（AttachThreadInput 舞蹈）
+                    if (ForceForeground(hwnd)) return;
+                    Thread.Sleep(70);
+                }
+                // 提不起来也不能装作没事：至少留一行现场，主实例那边还会再报一次气泡。
+                LogFail("第二次启动：窗口已还原但没能取得前台（前台锁）  现在的前台是 "
+                    + DescribeForegroundWindow());
+            }
+            catch (Exception ex) { LogFail("第二次启动：唤起窗口失败", ex); }
+        }
+
+        // 主实例：后台等次级实例的请求。IsBackground 保证它拖不住进程退出；
+        // 监听线程自己不碰 UI——窗口动作交给窗口线程（见 ShowFromSecondLaunch）。
+        private static void StartShowListener(MainForm form)
+        {
+            Thread listener = new Thread(delegate()
+            {
+                while (true)
+                {
+                    try { if (!ShowSignal.WaitOne()) return; }
+                    catch (Exception) { return; }
+                    try { form.ShowFromSecondLaunch(); }
+                    catch (Exception) { }
+                }
+            });
+            listener.IsBackground = true;
+            listener.Name = "show-listener";
+            listener.Start();
+        }
+
+        private static void ShowAlreadyRunningDialog()
+        {
+            MessageBox.Show(
+                "Freebuff 多开控制器已经在运行了。\n\n" + DescribeRunningController()
+                + "\n\n窗口可能被最小化、或藏在别的窗口后面——双击任务栏 / 托盘里的"
+                + "控制器图标就能把它叫回来。\n如果到处都找不到这个窗口，可以在任务管理器里"
+                + "结束上面这个进程，再重新双击打开。",
+                "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // 弹框里说清到底是谁占着：PID + 完整路径 + 启动时刻。「开机后一打开就说
+        // 被占用」这种没法当场复现的情况，全靠这几行判断是哪个进程、什么时候起来的。
+        private static string DescribeRunningController()
+        {
+            string mine = null;
+            try { mine = Process.GetCurrentProcess().Id.ToString(); }
+            catch { }
+            string found = "";
+            try
+            {
+                foreach (Process p in Process.GetProcessesByName("FreebuffController"))
+                {
+                    string pid;
+                    try { pid = p.Id.ToString(); }
+                    catch { continue; }
+                    if (pid == mine) continue;
+                    string where = "";
+                    try { where = p.MainModule.FileName; } catch { }
+                    string when = "";
+                    try { when = p.StartTime.ToString("HH:mm:ss"); } catch { }
+                    if (found.Length > 0) found += "\n";
+                    found += "· PID " + pid
+                        + (string.IsNullOrEmpty(where) ? "" : "（" + where + "）")
+                        + (string.IsNullOrEmpty(when) ? "" : "，启动于 " + when);
+                }
+            }
+            catch { }
+            return found.Length > 0 ? "占着它的是：\n" + found : "（读不出占用它的进程信息）";
+        }
     }
 
     public class MainForm : Form
@@ -99,6 +393,10 @@ namespace FreebuffController
         private static readonly string FreebuffExe = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Programs\\@codebufffreebuff-desktop\\Freebuff.exe");
+
+        // 装机目录（bun 编排器也在它下面）：判「这个进程是不是我们的」用。
+        private static readonly string FreebuffInstallDir =
+            Path.GetDirectoryName(FreebuffExe);
 
         private static readonly string DefaultState = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -172,8 +470,10 @@ namespace FreebuffController
         // same files and backup scheme as hanhua's apply.sh / restore.sh.
         private static readonly string FreebuffResources =
             Path.Combine(Path.GetDirectoryName(FreebuffExe), "resources");
+        private static readonly string InstalledUiDir =
+            Path.Combine(FreebuffResources, "orchestrator\\ui");
         private static readonly string InstalledUiIndex =
-            Path.Combine(FreebuffResources, "orchestrator\\ui\\index.html");
+            Path.Combine(InstalledUiDir, "index.html");
         private const string HanhuaMarker = "<html lang=\"zh-CN\">";
         // 英文原版备份的保留份数。每份约 40 MB（app.asar 28 MB + ui 12 MB），
         // 而每次 Freebuff 自动更新把汉化覆盖掉、控制器再自动恢复，就会新增一份。
@@ -201,6 +501,7 @@ namespace FreebuffController
         private string hanhuaBuildStamp;      // 最近一次看到的 output 指纹
         private DateTime hanhuaBuildStableAt; // 首次看到该指纹的时刻
         private string hanhuaBuildHandled;    // 已交给 StartAutoRestoreHanhua 的指纹
+        private string brokenLoggedStamp;     // 已记过「界面不完整」的 output 指纹（别每轮刷日志）
         private const double HanhuaBuildSettleSeconds = 8;
         // 静态：换文件与「把汉化包写进 output/」必须互斥，而后者在静态方法
         // FetchAndStageLatestPack 里（它看不到实例字段）。全进程只有一个主窗口，
@@ -212,6 +513,9 @@ namespace FreebuffController
         // 触发点：实测踩过，控制器启动那次被同批的汉化包检查吞掉，3 秒轮询那次刚够 8 秒稳定
         // 判定时用户已经打开了应用，于是那份构建被标成「已处理」，之后再没有人试。
         private string hanhuaPendingWhy;
+        // 待办里那次是不是「用户右键强制重装」：是的话重试时不能被「没有新包」挡回去。
+        private bool hanhuaForcePending;
+        private ToolTip hanhuaTip;   // 顶部入口的提示（持引用：不让它被回收）
         private DateTime hanhuaRetryAt;
         private const double HanhuaRetrySeconds = 10;
         // 自动应用汉化是默认行为，没有开关：Freebuff 的自动更新会把 app.asar 与 ui/
@@ -229,6 +533,13 @@ namespace FreebuffController
 
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+
+        // 失败日志的出口在 Program（它没有 MainForm 的实例状态）；这里给本文件里
+        // 二十多个调用点留一个不用每次写类名的短名。
+        private static void LogFail(string what) { Program.LogFail(what, null); }
+
+        private static void LogFail(string what, Exception ex) { Program.LogFail(what, ex); }
 
         public MainForm()
         {
@@ -268,11 +579,10 @@ namespace FreebuffController
         private void BuildUi()
         {
             Text = "Freebuff 多开控制器 v" + System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
-            // 垂直节奏统一成 10px：顶部行 14…34 → 表格 44…422 → 按钮行 432…468 →
-            // 事件 / 进度行 478…494 → 底边 504。底部不再有常驻文字（那行按需浮出、
-            // 没事时为空），所以空闲窗口只比原来多 12px 留白，看着仍然「到按钮行就收尾」。
-            // 原来那行紧贴在按钮下缘 1px、字又是暗灰，等于把一句一闪而过的话压在边上。
-            ClientSize = new Size(580, 504);
+            // 垂直节奏统一成 10px：顶部行 14…34 → 表格 44…488 → 按钮行 496…532 →
+            // 事件 / 进度行 542…560 → 底边 568。表格底部额外留出 6px 安全空间，
+            // 避免从底部收缩窗口时数字的最低像素被边界吃掉。
+            ClientSize = new Size(580, 568);
             BackColor = ColBg;
             ForeColor = ColText;
             Font = new Font("Microsoft YaHei UI", 9.75f);
@@ -299,6 +609,14 @@ namespace FreebuffController
             // 三个入口右对齐到表格右边线（560），彼此等距 10px——原来右边停在 558、
             // 间距 4 / 6 混着，与表格右边缘差 2px，扫一眼就能看出没对齐。
             hanhuaLink = MakeLink("汉化状态", 316, 80, delegate { OnHanhuaLinkClick(); });
+            // 右键 = 强制重装（不看有没有新包）。装机界面被上游更新或半截换文件弄坏时，
+            // 这是唯一不靠“等新包”就能自救的入口。
+            hanhuaLink.MouseUp += delegate(object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Right) ForceReapplyHanhua();
+            };
+            hanhuaTip = new ToolTip();
+            hanhuaTip.SetToolTip(hanhuaLink, "左键：检查有没有新汉化包　右键：强制重新应用当前汉化");
             updateLink = MakeLink("检查更新", 406, 72, delegate { CheckVersionAsync(true); });
             MakeLink("代理设置", 488, 72, delegate { OpenProxySettings(); });
 
@@ -327,30 +645,30 @@ namespace FreebuffController
             // CheckShareOnStartup），启动实例时也会自动触发（LaunchIndex）。
             // 5 个按钮等宽 100、间距 10、左右各 20——与表格同一条左右边线（20 / 560）。
             // 原来末位「刷新」只有 82 宽、右边距 23、几处间距 9 / 10 混着，整排看着是歪的。
-            Button btnLaunch = MakeButton("启动", 20, 432, 100, ColAccent, ColAccentHover);
+            Button btnLaunch = MakeButton("启动", 20, 496, 100, ColAccent, ColAccentHover);
             btnLaunch.Click += delegate { OnLaunch(); };
 
-            Button btnStop = MakeButton("停止", 130, 432, 100, ColNeutral, ColNeutralHover);
+            Button btnStop = MakeButton("停止", 130, 496, 100, ColNeutral, ColNeutralHover);
             btnStop.Click += delegate { OnStop(); };
 
-            Button btnReset = MakeButton("重置账号", 240, 432, 100, ColNeutral, ColNeutralHover);
+            Button btnReset = MakeButton("重置账号", 240, 496, 100, ColNeutral, ColNeutralHover);
             btnReset.Click += delegate { OnReset(); };
 
-            Button btnStopAll = MakeButton("停止全部", 350, 432, 100, ColNeutral, ColNeutralHover);
+            Button btnStopAll = MakeButton("停止全部", 350, 496, 100, ColNeutral, ColNeutralHover);
             btnStopAll.Click += delegate { OnStopAll(); };
 
-            Button btnRefresh = MakeButton("刷新", 460, 432, 100, ColNeutral, ColNeutralHover);
+            Button btnRefresh = MakeButton("刷新", 460, 496, 100, ColNeutral, ColNeutralHover);
             btnRefresh.Click += delegate { SetStatus("正在刷新…"); RefreshGrid(); FetchQuotasAsync(true); };
 
             // 底部那三行控件（汉化状态 / 版本链接 / 事件提示）不再常驻窗口。控件对象仍然
             // 建出来，是因为全篇的 SetStatus、RefreshHanhuaUi、ApplyVersionUi 还在往里写
             // 文案——留着它们，逻辑一行都不用改。
-            // 唯一的例外是 statusLabel：事件 / 进度那行挂回窗口（y=478），空文本时什么都
+            // 唯一的例外是 statusLabel：事件 / 进度那行挂回窗口（y=542），空文本时什么都
             // 画不出来，所以「没事发生」的窗口看着和没有这一行完全一样。汉化状态那句仍然
             // 只走托盘（常驻文字没人要看），文案去处见 SetTrayTip。
             hanhuaLabel = new Label();
             hanhuaLabel.AutoSize = false;
-            hanhuaLabel.Bounds = new Rectangle(20, 478, 200, 16);
+            hanhuaLabel.Bounds = new Rectangle(20, 542, 200, 18);
             hanhuaLabel.ForeColor = ColSub;
             hanhuaLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
 
@@ -359,8 +677,8 @@ namespace FreebuffController
             statusLabel = new Label();
             statusLabel.AutoSize = false;
             statusLabel.Text = ReadyStatus();
-            // 与表格同一条左右边线（20 / 560），底下留 10px。
-            statusLabel.Bounds = new Rectangle(20, 478, 540, 16);
+            // 与表格同一条左右边线（20 / 560），底下留 8px。
+            statusLabel.Bounds = new Rectangle(20, 542, 540, 18);
             // 用正文亮色，而不是原来的暗灰 ColSub：这行只在有事时出现、8 秒就消失，
             // 暗灰在深色窗口上根本来不及看清。按结果着色见 SetStatus 的 tint。
             statusLabel.ForeColor = ColText;
@@ -375,7 +693,7 @@ namespace FreebuffController
             versionLink.Text = string.IsNullOrEmpty(installedVersion)
                 ? "版本未知 · 检查更新"
                 : "v" + installedVersion + " · 检查更新";
-            versionLink.Bounds = new Rectangle(226, 478, 332, 16);
+            versionLink.Bounds = new Rectangle(226, 542, 332, 18);
             versionLink.ForeColor = ColSub;
             versionLink.Font = new Font("Microsoft YaHei UI", 8.5f);
             versionLink.TextAlign = ContentAlignment.MiddleRight;
@@ -538,7 +856,7 @@ namespace FreebuffController
         {
             grid = new DataGridView();
             grid.Location = new Point(20, 44);
-            grid.Size = new Size(540, 378); // exactly 38px header + 10 * 34px rows
+            grid.Size = new Size(540, 444); // 38px header + 10 * 40px rows + 6px bottom safety space
             grid.ScrollBars = ScrollBars.None;
             grid.ReadOnly = true;
             grid.AllowUserToAddRows = false;
@@ -572,8 +890,12 @@ namespace FreebuffController
             cs.ForeColor = ColText;
             cs.SelectionBackColor = ColSelect;
             cs.SelectionForeColor = Color.White;
+            // 给单元格上下各留 1px，避免数字字形贴到行边界时底部被裁切。
             cs.Font = new Font("Microsoft YaHei UI", 9.75f);
-            grid.RowTemplate.Height = 34;
+            cs.Padding = new Padding(0, 1, 0, 2);
+            cs.Alignment = DataGridViewContentAlignment.MiddleLeft;
+            cs.WrapMode = DataGridViewTriState.False;
+            grid.RowTemplate.Height = 40;
 
             string[] headers = { "实例", "状态", "账号", "额度" };
             int[] weights = { 13, 14, 40, 33 };
@@ -582,7 +904,7 @@ namespace FreebuffController
                 int index = grid.Columns.Add("c" + c, headers[c]);
                 grid.Columns[index].FillWeight = weights[c];
                 grid.Columns[index].SortMode = DataGridViewColumnSortMode.NotSortable;
-                grid.Columns[index].DefaultCellStyle.Padding = new Padding(12, 0, 0, 0);
+                grid.Columns[index].DefaultCellStyle.Padding = new Padding(12, 1, 0, 2);
             }
             // The quota summary is three compact windows; keep it readable on
             // high-DPI instead of letting AutoSizeColumnsMode.Fill shrink it.
@@ -593,6 +915,9 @@ namespace FreebuffController
                 string name = (i == 0) ? "主实例" : ("实例 " + i);
                 grid.Rows.Add(name, "…", "…", "…");
             }
+            // 最下面这一行单独上移一点，给数字下沿留出余量；其他行和整体布局不变。
+            for (int c = 0; c < grid.Columns.Count; c++)
+                grid.Rows[MaxSlot].Cells[c].Style.Padding = new Padding(12, 1, 0, 10);
             grid.ClearSelection();
             grid.CurrentCell = null;
             grid.CellDoubleClick += delegate(object sender, DataGridViewCellEventArgs e)
@@ -652,11 +977,58 @@ namespace FreebuffController
             tray.DoubleClick += delegate { ShowUp(); };
         }
 
+        private DateTime showFailNotifiedAt = DateTime.MinValue;
+
         private void ShowUp()
         {
             Show();
             WindowState = FormWindowState.Normal;
             Activate();
+            // 从托盘或第二次双击把窗口叫回来时，Activate 常常只闪一下任务栏
+            // （后台进程抢不到前台），补一发 SetForegroundWindow 才真跳到眼前。
+            //
+            // 但前台锁只对「收到最近一次输入」的进程放行，**失败是常态**，而这里
+            // 以前不判结果：窗口没提到最前时用户看到的就是「双击了，什么都没发生」。
+            // 所以真判一次，并留退路。真拿到前台的路径靠次级实例先让渡资格
+            // （Program.TryRequestShow 里的 AllowSetForegroundWindow）撑住，
+            // 外加次级实例自己那一发补提（RaiseOtherControllerWindow）。
+            bool raised = false;
+            try { raised = Program.SetForegroundWindow(Handle); } catch { }
+            if (!raised)
+            {
+                // 退路一：走 Alt+Tab 那条路（不受前台锁限制）
+                try { Program.SwitchToThisWindow(Handle, true); } catch { }
+                raised = (Program.GetForegroundWindow() == Handle);
+            }
+            // 退路二：临时挂到当前前台窗口的输入队列上，拿到「最近一次输入」的身份
+            if (!raised) raised = Program.ForceForeground(Handle);
+            if (!raised) NotifyShowUpFailed();
+        }
+
+        // 出现了才报，且 60 秒内只说一次（托盘双击本该成功的场景不吵人）。
+        // 关键是这句话本身：窗口其实已经还原了，只是没跳到最前——不报的话
+        // 用户会以为双击根本没生效。
+        private void NotifyShowUpFailed()
+        {
+            if ((DateTime.Now - showFailNotifiedAt).TotalSeconds < 60) return;
+            showFailNotifiedAt = DateTime.Now;
+            LogFail("ShowUp：窗口已还原但未取得前台（前台锁）  现在的前台是 "
+                + Program.DescribeForegroundWindow());
+            TrayNotify("控制器窗口已还原，但没能跳到最前——它就在任务栏上（按 Alt+Tab 或点图标即可）。");
+        }
+
+        // 第二次双击快捷方式：主实例收到请求后把窗口叫到前台，并回执一声——那个
+        // 实例就不再弹「已经在运行了」。用 BeginInvoke 而不阻塞监听线程：模态
+        // 对话框开着时 UI 线程正忙，Invoke 会把回执一直拖到对话框关掉之后。
+        internal void ShowFromSecondLaunch()
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            try
+            {
+                BeginInvoke((MethodInvoker)delegate { ShowUp(); });
+                try { Program.AckSignal.Set(); } catch { }
+            }
+            catch { }
         }
 
         // 顶部「汉化状态」入口：先把当前状态浮到按钮下方那行，再立刻检查有没有
@@ -668,6 +1040,36 @@ namespace FreebuffController
             string now = (hanhuaLabel == null) ? null : hanhuaLabel.Text;
             SetStatus((string.IsNullOrEmpty(now) ? "汉化状态未知" : now) + " · 正在检查新汉化包…");
             CheckPackUpdateAsync(true);
+        }
+
+        // 右键「汉化状态」：强制重新应用。不看有没有新包，直接拿 output/ 里那份重装。
+        // 存在理由：自动路径全都以「有新包 / 装机是英文」为前提，而「哨兵在、资源不在」
+        // 的半截状态两者都不满足——那种时候（或者装机文件被别人动过）只有这里能自救。
+        private void ForceReapplyHanhua()
+        {
+            RefreshHanhuaUi();
+            RestoreOutcome outcome = StartAutoRestoreHanhua("手动强制重装", null, true);
+            if (outcome == RestoreOutcome.Started) return; // 状态行已经写了进度，后台接手
+            string why;
+            switch (outcome)
+            {
+                case RestoreOutcome.NoBuild:
+                    why = "汉化仓库里没有可用的 output/——先在 freebuff-zh 里跑一次 bash build.sh。";
+                    break;
+                case RestoreOutcome.VersionMismatch:
+                    why = "output/ 那份构建的 targetVersion 与装机 Freebuff 版本对不上，装上会引用不存在的 bundle，已跳过。";
+                    break;
+                case RestoreOutcome.Busy:
+                    why = "正在换文件或正在往 output/ 写，几秒后自动重试。";
+                    break;
+                case RestoreOutcome.InstancesRunning:
+                    why = "还有实例在跑——关掉所有 Freebuff 窗口后十秒内会自动重装。";
+                    break;
+                default:
+                    why = "没有可重装的内容。";
+                    break;
+            }
+            SetStatus("强制重装汉化：" + why, ColNewVersion);
         }
 
         // 代理设置入口：对话框内保存即写入 proxy.txt 并 ReloadProxyConfig，
@@ -807,7 +1209,7 @@ namespace FreebuffController
             if (dgv != null)
             {
                 int header = (int)Math.Round(38 * s);
-                int row = (int)Math.Round(34 * s);
+                int row = (int)Math.Round(40 * s);
                 dgv.ColumnHeadersHeight = header;
                 dgv.RowTemplate.Height = row;
                 foreach (DataGridViewRow r in dgv.Rows) r.Height = row;
@@ -819,9 +1221,10 @@ namespace FreebuffController
                 if (cs2.Font != null)
                     cs2.Font = new Font(cs2.Font.FontFamily, cs2.Font.Size * s, cs2.Font.Style);
                 foreach (DataGridViewColumn col in dgv.Columns)
-                    col.DefaultCellStyle.Padding = new Padding((int)Math.Round(12 * s), 0, 0, 0);
+                    col.DefaultCellStyle.Padding = new Padding((int)Math.Round(12 * s), (int)Math.Round(1 * s), 0, (int)Math.Round(2 * s));
+                // 保留 6px 底部安全空间，避免最后一行的数字被控件边界裁掉。
                 // keep the exact fit (header + 10 rows, scrollbars disabled)
-                dgv.Height = header + row * dgv.Rows.Count;
+                dgv.Height = header + row * dgv.Rows.Count + (int)Math.Round(6 * s);
             }
             foreach (Control child in c.Controls) ScaleControlTree(child, s);
         }
@@ -2236,10 +2639,26 @@ namespace FreebuffController
                         // 上次被「有实例在跑 / 正在往 output/ 写」拒掉的自动应用：实例一退出
                         // 就换上，不必等别的触发点（用户关掉 Freebuff 后十秒内即生效）。
                         TryPendingHanhuaRestore();
+                        // 启动时因为实例在跑而没改成的 state.json（injectAgentsMd），
+                        // 等它退了再补。
+                        TryPendingAgentsMdFix();
                     });
                 }
                 catch { }
             });
+        }
+
+        // 启动时因为「实例正在跑」而没改成的 state.json（见 EnsureAgentsMdEnabled），
+        // 在 3 秒轮询里等它退出后补上。30 秒才试一次就够：那个开关只在实例**下次**
+        // 启动时才会被读到，而每试一次都要跑一遍 WMI（清单实例）。
+        private DateTime agentsMdRetryAt = DateTime.MinValue;
+
+        private void TryPendingAgentsMdFix()
+        {
+            if (!AgentsMdPending) return;
+            if ((DateTime.Now - agentsMdRetryAt).TotalSeconds < 30) return;
+            agentsMdRetryAt = DateTime.Now;
+            EnsureAgentsMdEnabled();
         }
 
         private void ApplyToGrid(bool mainRunning, HashSet<int> slots, string[] accounts)
@@ -2751,17 +3170,20 @@ namespace FreebuffController
                 return;
             }
             SetStatus("已发出停止命令…");
-            Delay(900, RefreshGrid);
+            // 这里先请会话自己退（最多 StopGraceMs）再硬杀，所以刷新要比旧版晚一点：
+            // 9 百毫秒时进程可能还在优雅退出，那一格会白白闪一下“运行中”。
+            Delay(StopGraceMs + 1200, RefreshGrid);
         }
 
         private void OnStopAll()
         {
+            int swept = 0;
             try
             {
                 string[] all = new string[MaxSlot + 1];
                 all[0] = "main";
                 for (int i = 1; i <= MaxSlot; i++) all[i] = i.ToString();
-                KillInstances(all);
+                swept = KillInstances(true, all);
             }
             catch (Exception ex)
             {
@@ -2769,8 +3191,10 @@ namespace FreebuffController
                     "停止失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
-            SetStatus("已发出全部停止命令…");
-            Delay(900, RefreshGrid);
+            SetStatus(swept > 0
+                ? "已发出全部停止命令…（顺带收掉 " + swept + " 个残留进程）"
+                : "已发出全部停止命令…");
+            Delay(StopGraceMs + 1200, RefreshGrid);
         }
 
         private void OnReset()
@@ -2791,7 +3215,9 @@ namespace FreebuffController
             if (!yes) return;
             KillInstances(idx.ToString());
             SetStatus("正在重置实例 " + idx + "…");
-            Delay(1200, delegate { TryDeleteWithRetry(idx, 3); });
+            // 等它优雅退（最多 StopGraceMs）完再开始删目录：删得太早会撞上正在退的
+            // 进程占着的 profile 文件，白白消耗重试次数。
+            Delay(StopGraceMs + 800, delegate { TryDeleteWithRetry(idx, 3); });
         }
 
         private static void TryDeleteDir(string dir)
@@ -2813,6 +3239,7 @@ namespace FreebuffController
                       && !Directory.Exists(SlotUserData(idx));
             if (clean || attemptsLeft <= 1)
             {
+                if (!clean) LogFail("重置实例 " + idx + " 时目录删不掉（被占用？）");
                 SetStatus(clean
                     ? ("实例 " + idx + " 已重置 ✓")
                     : ("实例 " + idx + " 有文件被占用，稍后再点一次重置即可"));
@@ -3303,7 +3730,25 @@ namespace FreebuffController
 
         // One WMI pass for however many targets we are stopping, so
         // "stop all" never blocks the UI thread on ten sequential queries.
+        //
+        // 顺序是「先礼、后兵、再收尾」，每一步都在补上一步的缺口：
+        //   ① 优雅关闭：先请有主窗口的实例自己退（CloseMainWindow，最多等 StopGraceMs）。
+        //      硬杀不给 Chromium / SQLite 收尾的机会，而 profile 里的 desktop-v2.db 及
+        //      其 -wal / -shm 就靠这个「正常退出」把数据刷干净（本文件自己都要处理这两个
+        //      后缀，见 SnapshotDb）。
+        //   ② 硬杀没退的。
+        //   ③ 连子孙一起收掉。Process.Kill = TerminateProcess，Windows 不连坐子进程：
+        //      编排器 bun-baseline.exe 的 exe 名不是 Freebuff.exe，既进不了本方法的筛选
+        //      条件、也不会因为父进程死掉而退，于是「停止」之后它一直挂着占端口/占地盘。
+        //      旧版只修了检测端（IsInstanceProcess 排除 --type= 子进程），没修这里。
         private static void KillInstances(params string[] targets)
+        {
+            KillInstances(false, targets);
+        }
+
+        // sweepOrphans 只在「停止全部」时为真：顺手把上一次停止遗留的孤儿编排器也收掉。
+        // 返回实际收掉的子孙/孤儿进程数（调用方拿它报一句“顺带收拾了 N 个残留”）。
+        private static int KillInstances(bool sweepOrphans, params string[] targets)
         {
             var pids = new List<int>();
             try
@@ -3329,18 +3774,174 @@ namespace FreebuffController
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { LogFail("枚举 Freebuff 实例失败（停止可能没停干净）", ex); }
             pids.Sort();
+
+            // 杀之前拍一张父子快照：父进程一死，ParentProcessId 链就断了。
+            List<ProcRow> tree = SnapshotProcessTable();
+
+            // ① 优雅关闭（子进程没有主窗口，CloseMainWindowOf 会立刻返回 false）
+            bool waitForGraceful = false;
             foreach (int pid in pids)
+                waitForGraceful |= CloseMainWindowOf(pid);
+            int waited = 0;
+            while (waitForGraceful && waited < StopGraceMs)
             {
-                try
+                Thread.Sleep(150);
+                waited += 150;
+                waitForGraceful = false;
+                foreach (int pid in pids)
                 {
-                    using (var p = Process.GetProcessById(pid))
+                    if (IsAlive(pid)) { waitForGraceful = true; break; }
+                }
+            }
+
+            // ② 硬杀
+            foreach (int pid in pids) KillPid(pid);
+
+            // ③ 子孙：只碰装机目录下的进程（bun 编排器与崩溃上报进程都在那里），
+            //    别的进程一律不认——宁可漏杀也不能误杀用户的其它程序。
+            var byPid = new Dictionary<int, ProcRow>();
+            foreach (ProcRow r in tree) byPid[r.Pid] = r;
+            var roots = new HashSet<int>(pids);
+            var doomed = new HashSet<int>();
+            foreach (ProcRow r in tree)
+            {
+                if (r.Pid == 0 || roots.Contains(r.Pid)) continue;
+                if (!IsUnderFreebuffInstall(r.Exe)) continue;
+                if (IsDescendantOf(r.Pid, byPid, roots)) doomed.Add(r.Pid);
+            }
+            // 孤儿编排器：父进程早就不在了（上一次“停止”留下的），只有明确要求停全部
+            // 时才顺手收。父进程还在的那些由上面那条管（不能因为停 slot 3 而误杀 slot 5）。
+            var swept = new List<int>();
+            if (sweepOrphans)
+            {
+                foreach (ProcRow r in tree)
+                {
+                    if (!IsSidecarExe(r)) continue;
+                    if (doomed.Contains(r.Pid)) continue;
+                    if (r.Parent != 0 && byPid.ContainsKey(r.Parent)) continue;
+                    swept.Add(r.Pid);
+                }
+                foreach (int pid in swept) doomed.Add(pid);
+            }
+            foreach (int pid in doomed) KillPid(pid);
+            if (swept.Count > 0)
+                LogFail("停止全部：收掉 " + swept.Count + " 个残留编排器（父进程早已退出）");
+            return doomed.Count;
+        }
+
+        private const int StopGraceMs = 2000;
+
+        // 进程表（只取杀进程树要的几列），杀之前拍一次。
+        private class ProcRow
+        {
+            public int Pid;
+            public int Parent;
+            public string Name;
+            public string Exe;
+        }
+
+        private static List<ProcRow> SnapshotProcessTable()
+        {
+            var rows = new List<ProcRow>();
+            try
+            {
+                using (var searcher = new ManagementObjectSearcher(
+                    "SELECT ProcessId, ParentProcessId, Name, ExecutablePath FROM Win32_Process"))
+                using (ManagementObjectCollection hits = searcher.Get())
+                {
+                    foreach (ManagementObject o in hits)
                     {
-                        p.Kill();
+                        try
+                        {
+                            var r = new ProcRow();
+                            r.Pid = (int)(uint)o["ProcessId"];
+                            r.Parent = (int)(uint)o["ParentProcessId"];
+                            r.Name = o["Name"] as string;
+                            r.Exe = o["ExecutablePath"] as string;
+                            rows.Add(r);
+                        }
+                        catch { } // 受保护进程读不到路径：跳过这一个
                     }
                 }
-                catch { }
+            }
+            catch (Exception ex) { LogFail("枚举进程表失败（这次停止可能留残留）", ex); }
+            return rows;
+        }
+
+        // 装机目录里的进程都算「我们的」：编排器就在 resources\bun\ 下，但它不叫
+        // Freebuff.exe——旧版按 exe 名筛选，永远选不中它。
+        private static bool IsUnderFreebuffInstall(string exePath)
+        {
+            if (string.IsNullOrEmpty(exePath)) return false;
+            try
+            {
+                string root = Path.GetFullPath(FreebuffInstallDir).TrimEnd('\\', '/') + "\\";
+                return Path.GetFullPath(exePath).StartsWith(root, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        // 编排器（resources\bun\bun-baseline.exe，旧版叫 bun.exe 的那类）：名字不固定，
+        // 按「装机目录下的 bun*.exe」认。
+        private static bool IsSidecarExe(ProcRow r)
+        {
+            return !string.IsNullOrEmpty(r.Name)
+                && r.Name.StartsWith("bun", StringComparison.OrdinalIgnoreCase)
+                && IsUnderFreebuffInstall(r.Exe);
+        }
+
+        // 顺着父子链往上找，看是否源自本次要停的进程；深度设上限，链断了/自环也不会死循环。
+        private static bool IsDescendantOf(int pid, Dictionary<int, ProcRow> byPid, HashSet<int> roots)
+        {
+            int cur = pid;
+            for (int depth = 0; depth < 16; depth++)
+            {
+                ProcRow r;
+                if (!byPid.TryGetValue(cur, out r)) return false;
+                if (roots.Contains(r.Parent)) return true;
+                if (r.Parent == 0 || r.Parent == cur) return false;
+                cur = r.Parent;
+            }
+            return false;
+        }
+
+        // 请进程自己退（发 WM_CLOSE）。true = 关闭请求真发出去了，值得等一等。
+        private static bool CloseMainWindowOf(int pid)
+        {
+            try
+            {
+                using (Process p = Process.GetProcessById(pid))
+                {
+                    if (p.MainWindowHandle == IntPtr.Zero) return false; // 子进程 / 无窗口
+                    return p.CloseMainWindow();
+                }
+            }
+            catch { return false; } // 已经退了 / 读不到：交给后面的硬杀
+        }
+
+        private static bool IsAlive(int pid)
+        {
+            try
+            {
+                using (Process p = Process.GetProcessById(pid)) { return !p.HasExited; }
+            }
+            catch { return false; } // GetProcessById 抛 = 已经不在了
+        }
+
+        private static void KillPid(int pid)
+        {
+            try
+            {
+                using (Process p = Process.GetProcessById(pid)) { p.Kill(); }
+            }
+            catch (Exception ex)
+            {
+                // 最常见的是「刚好自己退了」（InvalidOperationException / ArgumentException）
+                // ——那不是问题；只有真杀不动（AccessDenied 等）才值得记一行。
+                if (!(ex is InvalidOperationException) && !(ex is ArgumentException))
+                    LogFail("杀进程失败 pid=" + pid, ex);
             }
         }
 
@@ -4026,7 +4627,13 @@ namespace FreebuffController
             string outPack = OutputPackVersion(hanhuaDir);
             bool newerPack = build != null && PendingPackIsNewer();
 
-            if (applied)
+            // 「已应用」只看 index.html 里的那行 lang="zh-CN"（哨兵），所以它可能与
+            // “界面其实不完整”同时成立——那种状态下要把话说出来，否则用户看到的只是
+            // 一个白屏窗口 + 一句「汉化 ✓」。
+            bool broken = applied && !InstalledUiIntact();
+            if (broken)
+                SetHanhuaText("汉化 ✗ 界面不完整 · 待重装" + tag);
+            else if (applied)
                 SetHanhuaText(newerPack
                     ? ("汉化 ✓ · 新包 " + outPack + " 待换")
                     : ("汉化 ✓" + tag));
@@ -4036,7 +4643,8 @@ namespace FreebuffController
                 SetHanhuaText("汉化 ✗ 缺构建");
             else
                 SetHanhuaText("汉化 ✗ 未找到仓库");
-            hanhuaLabel.ForeColor = ((!applied && build != null) || newerPack) ? ColGreen : ColSub;
+            hanhuaLabel.ForeColor = broken ? ColNewVersion
+                : (((!applied && build != null) || newerPack) ? ColGreen : ColSub);
         }
 
         // exe-adjacent probes → config (the order the README documents). A
@@ -4134,18 +4742,331 @@ namespace FreebuffController
                 CopyDir(sub, Path.Combine(dst, Path.GetFileName(sub)));
         }
 
+        // index.html 里引用的相对资源（./assets/xxx）。名字带哈希，所以少一个就是白屏。
+        private static readonly Regex UiAssetRefRegex =
+            new Regex("(?:src|href)=\"\\./(assets/[^\"]+)\"");
+
+        // 一个 ui 目录是否「完整」：index.html 在，且它引用的每个 ./assets/… 都在。
+        // 这是哨兵（HanhuaApplied 只看那一行 lang="zh-CN"）之外的第二道判据——
+        // 为什么必须有第二道，见 ReplaceUiDir 的注释。
+        private static bool UiDirIntact(string dir)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(dir)) return false;
+                string index = Path.Combine(dir, "index.html");
+                if (!File.Exists(index)) return false;
+                MatchCollection refs = UiAssetRefRegex.Matches(File.ReadAllText(index));
+                if (refs.Count == 0)
+                {
+                    // 一个引用都找不到：大概率是构建格式变了（比如改成绝对路径），
+                    // 不是「界面坏了」。那就别报假警——否则每次开机都会把一份好界面
+                    // 当成坏的、反复重装，还把状态行写成红的。
+                    LogFail("界面里没找到 ./assets/ 引用（构建格式变了？），跳过完整性校验：" + dir);
+                    return true;
+                }
+                foreach (Match m in refs)
+                {
+                    string rel = m.Groups[1].Value.Replace('/', '\\');
+                    if (!File.Exists(Path.Combine(dir, rel))) return false;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogFail("校验界面完整性失败：" + dir, ex);
+                return false;
+            }
+        }
+
+        private static bool InstalledUiIntact()
+        {
+            return UiDirIntact(InstalledUiDir);
+        }
+
         // Clean-replace orchestrator/ui with srcUi — the same end state as
-        // restore.sh's "rm -rf + cp -r". Freebuff is stopped by the preflight,
-        // so removing the old directory first is safe, and a merge-copy would
-        // let stale hashed assets pile up across versions. srcUi is validated
-        // before anything is touched so a broken source can't half-apply.
+        // restore.sh's "rm -rf + cp -r"（先清空再拷，不能合并：哈希资源跨版本会越堆越多）。
+        //
+        // 但旧写法「先 rm -rf 再逐文件拷」留了一个又宽又危险的空窗：
+        //   · 「汉化是否已应用」判的是 index.html 里的 <html lang="zh-CN">（HanhuaApplied），
+        //     而 index.html 是 CopyDir 拷的**第一个**文件（顶层文件先于 assets/ 递归），
+        //     于是哨兵在第一个毫秒就立住了、而实测 323 个文件 / 29 MB 资源还在路上；
+        //   · 中途任何一步失败（磁盘满 / 杀软锁文件 / 断电 / 控制器被结束）留下的就是
+        //     「控制器认为已应用、实际 index.html 引用的哈希 bundle 不存在」的白屏态，
+        //     而那之后没有任何自动修复路径（BackupPristineIfNeeded 只在未应用时才留
+        //     备份，也没有完整性校验）。
+        // 现在拆成「先完整落地 → 校验引用齐全 → 两次改名换位」：改名是同卷元数据
+        // 操作，所以装机目录要么是旧的完整份、要么是新的完整份，没有第三态；第二次
+        // 改名失败还会把旧的移回来。
         private static void ReplaceUiDir(string srcUi)
+        {
+            ReplaceUiDir(srcUi, FreebuffResources);
+        }
+
+        // dstRoot 可注入：自测（--self-test）拿临时目录跑同一段逻辑。
+        private static void ReplaceUiDir(string srcUi, string dstRoot)
         {
             if (!Directory.Exists(srcUi))
                 throw new ApplicationException("缺少 ui 目录：" + srcUi);
-            string dst = Path.Combine(FreebuffResources, "orchestrator\\ui");
-            if (Directory.Exists(dst)) Directory.Delete(dst, true);
-            CopyDir(srcUi, dst);
+            string dst = Path.Combine(dstRoot, "orchestrator\\ui");
+            string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            string staging = Path.Combine(dstRoot, "orchestrator\\ui.new-" + stamp);
+            string retired = Path.Combine(dstRoot, "orchestrator\\ui.old-" + stamp);
+            bool swapped = false;
+            try
+            {
+                if (Directory.Exists(staging)) Directory.Delete(staging, true);
+                CopyDir(srcUi, staging);
+                // 落地之后、换位之前校一次：源自己就是半截（build.sh 跑到一半、拷到一半）
+                // 的话，宁可这次不换，也不把半截装进装机目录。
+                if (!UiDirIntact(staging))
+                    throw new ApplicationException(
+                        "汉化包里的 ui/ 不完整（index.html 引用的资源缺失），装机保持原样");
+                if (Directory.Exists(dst))
+                {
+                    if (Directory.Exists(retired)) Directory.Delete(retired, true);
+                    Directory.Move(dst, retired);
+                }
+                try
+                {
+                    Directory.Move(staging, dst);
+                    swapped = true;
+                }
+                catch (Exception ex)
+                {
+                    // 第二次改名失败：把旧的移回来，别把装机侧留成「没有 ui」。
+                    if (Directory.Exists(retired) && !Directory.Exists(dst))
+                    {
+                        try { Directory.Move(retired, dst); }
+                        catch (Exception back) { LogFail("换界面失败后回滚也失败了：" + dst, back); }
+                    }
+                    LogFail("换界面失败（已尝试回滚）：" + dst, ex);
+                    throw;
+                }
+            }
+            finally
+            {
+                if (Directory.Exists(staging)) { try { Directory.Delete(staging, true); } catch { } }
+                // 只有换位真的成了才删旧目录：回滚失败时它就是唯一的完整旧份，留着
+                // （不然「删了旧的、新的也没上」就是把装机弄成彻底没界面）。
+                if (swapped && Directory.Exists(retired))
+                {
+                    try { Directory.Delete(retired, true); }
+                    catch (Exception ex) { LogFail("旧界面目录删不掉（无害，下次再收）：" + retired, ex); }
+                }
+            }
+        }
+
+        // 换位过程中的中间目录（ui.new-* / ui.old-*）：装机目录是 app 的 resources，
+        // 不该往里堆我们的垃圾，启动时清一遍。
+        // 一个例外：装机 ui/ 不在（说明上一次连回滚都没成）时，ui.old-* 是唯一的完整
+        // 旧份，绝不能删。
+        private static string PruneUiSwapDirs()
+        {
+            return PruneUiSwapDirs(FreebuffResources);
+        }
+
+        // dstRoot 可注入：自测（--self-test）拿临时目录跑同一段逻辑。
+        private static string PruneUiSwapDirs(string dstRoot)
+        {
+            try
+            {
+                string orch = Path.Combine(dstRoot, "orchestrator");
+                if (!Directory.Exists(orch)) return null;
+                bool dstOk = File.Exists(Path.Combine(orch, "ui\\index.html"));
+                var dirs = new List<string>();
+                dirs.AddRange(Directory.GetDirectories(orch, "ui.new-*"));
+                dirs.AddRange(Directory.GetDirectories(orch, "ui.old-*"));
+                long freed = 0;
+                int removed = 0;
+                foreach (string d in dirs)
+                {
+                    if (!dstOk && d.IndexOf("ui.old-", StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
+                    long size = DirSize(d);
+                    try
+                    {
+                        Directory.Delete(d, true);
+                        freed += size;
+                        removed++;
+                    }
+                    catch { } // 占用中：留着，下次再试
+                }
+                if (removed == 0) return null;
+                return "已清理 " + removed + " 个换文件中间目录（" + HumanSize(freed) + "）";
+            }
+            catch { return null; }
+        }
+
+        // ---------- 自测（--self-test）----------
+        // 「换文件」这条路径最容易出事、又最难手工复现（要装机目录、要实例全关、要刚好
+        // 在拷一半时断掉），所以把它拉出来跑一遍：全部在 %TEMP% 里的假树上跑（dstRoot
+        // 可注入），不碰装机目录、不进界面。CI 的 build 流程也会跑它。
+        // 用法：FreebuffController.exe --self-test <报告文件>；退出码 0 = 全过。
+        internal static int RunSelfTest(string reportPath)
+        {
+            if (string.IsNullOrEmpty(reportPath))
+                reportPath = Path.Combine(Path.GetTempPath(), "freebuff-controller-selftest.txt");
+            string root = Path.Combine(Path.GetTempPath(), "ctrl-selftest-" + Guid.NewGuid().ToString("N"));
+            var log = new List<string>();
+            int failed = 0;
+            Program.FailLogMuted = true; // 假夹具的预期失败不往用户日志里写（见 FailLogMuted）
+            Action<string, bool, string> check = delegate(string name, bool ok, string detail)
+            {
+                if (!ok) failed++;
+                log.Add((ok ? "PASS  " : "FAIL  ") + name
+                    + (string.IsNullOrEmpty(detail) ? "" : ("   [" + detail + "]")));
+            };
+            try
+            {
+                Directory.CreateDirectory(root);
+                string srcGood = Path.Combine(root, "src-good");
+                string srcBroken = Path.Combine(root, "src-broken");
+                MakeFakeUi(srcGood, "0.0.131.1", true);
+                MakeFakeUi(srcBroken, "0.0.131.1", false); // 缺引用的 assets/*
+
+                // ① 完整性校验认得出「好」与「坏」
+                check("UiDirIntact：index.html + 引用的资源都在 = 完整",
+                    UiDirIntact(srcGood), srcGood);
+                check("UiDirIntact：引用的资源缺失 = 不完整（哨兵在也不认）",
+                    !UiDirIntact(srcBroken), srcBroken);
+                // 反过来也不能报假警：找不到任何 ./assets/ 引用时按「无法判断」处理，
+                // 不能当成坏界面——否则构建格式一变就会反复重装 + 状态行一直挂红。
+                string srcNoRefs = Path.Combine(root, "src-norefs");
+                Directory.CreateDirectory(srcNoRefs);
+                File.WriteAllText(Path.Combine(srcNoRefs, "index.html"),
+                    "<html lang=\"zh-CN\"><body>no asset refs</body></html>",
+                    new System.Text.UTF8Encoding(false));
+                check("UiDirIntact：找不到资源引用时不报假警（按无法判断算）",
+                    UiDirIntact(srcNoRefs), srcNoRefs);
+
+                // ② 版本戳读得到（自动应用的触发条件之一）
+                check("PackVersionAt：读得到 ui/index.html 里的 hanhua-pack 戳",
+                    PackVersionAt(Path.Combine(srcGood, "index.html")) == "0.0.131.1", "");
+
+                // ③ 正常换位：新内容到位、旧内容与中间目录都不留
+                string dstA = Path.Combine(root, "dst-a");
+                MakeFakeUi(Path.Combine(dstA, "orchestrator\\ui"), "0.0.0", true);
+                bool threw = false;
+                try { ReplaceUiDir(srcGood, dstA); }
+                catch { threw = true; }
+                string orchA = Path.Combine(dstA, "orchestrator");
+                check("ReplaceUiDir：不抛异常", !threw, "");
+                check("ReplaceUiDir：新那份真的到位（版本戳 = 0.0.131.1）",
+                    PackVersionAt(Path.Combine(orchA, "ui\\index.html")) == "0.0.131.1", "");
+                check("ReplaceUiDir：新那份能通过完整性校验",
+                    UiDirIntact(Path.Combine(orchA, "ui")), "");
+                check("ReplaceUiDir：不留 ui.new-* / ui.old-* 中间目录",
+                    Directory.GetDirectories(orchA, "ui.new-*").Length == 0
+                    && Directory.GetDirectories(orchA, "ui.old-*").Length == 0,
+                    string.Join(",", Directory.GetDirectories(orchA)));
+
+                // ④ 源头就是半截（build.sh 跑到一半）→ 这次不换，装机分毫不动
+                string dstB = Path.Combine(root, "dst-b");
+                string oldB = Path.Combine(dstB, "orchestrator\\ui");
+                MakeFakeUi(oldB, "OLD-MARKER", true);
+                File.WriteAllText(Path.Combine(oldB, "index.html"),
+                    "<html lang=\"en\"><meta name=\"hanhua-pack\" content=\"OLD-MARKER\">"
+                    + "<script src=\"./assets/old.js\"></script>", new System.Text.UTF8Encoding(false));
+                threw = false;
+                try { ReplaceUiDir(srcBroken, dstB); }
+                catch { threw = true; }
+                check("ReplaceUiDir：源不完整时必须拒绝（而不是装上去）", threw, "");
+                check("ReplaceUiDir：被拒后装机那份原样不动（旧的 " + "OLD-MARKER 还在）",
+                    PackVersionAt(Path.Combine(oldB, "index.html")) == "OLD-MARKER", "");
+                check("ReplaceUiDir：被拒后不留半截新目录",
+                    Directory.GetDirectories(Path.Combine(dstB, "orchestrator"), "ui.*-*").Length == 0,
+                    string.Join(",", Directory.GetDirectories(Path.Combine(dstB, "orchestrator"))));
+
+                // ⑤ 中间目录清理：装机 ui 在 → 全清；装机 ui 不在 → ui.old-* 必须留着
+                string dstC = Path.Combine(root, "dst-c");
+                MakeFakeUi(Path.Combine(dstC, "orchestrator\\ui"), "0.0.131.1", true);
+                Directory.CreateDirectory(Path.Combine(dstC, "orchestrator\\ui.new-aaaa"));
+                Directory.CreateDirectory(Path.Combine(dstC, "orchestrator\\ui.old-bbbb"));
+                PruneUiSwapDirs(dstC);
+                check("PruneUiSwapDirs：装机 ui 在时，中间目录全清",
+                    Directory.GetDirectories(Path.Combine(dstC, "orchestrator")).Length == 1, "");
+                string dstD = Path.Combine(root, "dst-d");
+                Directory.CreateDirectory(Path.Combine(dstD, "orchestrator\\ui.new-cccc"));
+                Directory.CreateDirectory(Path.Combine(dstD, "orchestrator\\ui.old-dddd"));
+                PruneUiSwapDirs(dstD);
+                check("PruneUiSwapDirs：装机 ui 不在时 ui.old-* 留着（唯一的旧份），ui.new-* 照清",
+                    Directory.GetDirectories(Path.Combine(dstD, "orchestrator"), "ui.old-*").Length == 1
+                    && Directory.GetDirectories(Path.Combine(dstD, "orchestrator"), "ui.new-*").Length == 0,
+                    string.Join(",", Directory.GetDirectories(Path.Combine(dstD, "orchestrator"))));
+
+                // ⑥ 原子写：内容换掉，且不留 .tmp-* 尾巴
+                string tmpFile = Path.Combine(root, "atomic.txt");
+                File.WriteAllText(tmpFile, "v1", new System.Text.UTF8Encoding(false));
+                WriteFileAtomic(tmpFile, "v2");
+                check("WriteFileAtomic：内容被替换", File.ReadAllText(tmpFile) == "v2", "");
+                check("WriteFileAtomic：不留临时文件",
+                    Directory.GetFiles(root, "atomic.txt.tmp-*").Length == 0, "");
+
+                // ⑦ 进程树查找：只认「源自要停的那个」的子孙
+                var byPid = new Dictionary<int, ProcRow>();
+                byPid[10] = new ProcRow { Pid = 10, Parent = 0 };
+                byPid[11] = new ProcRow { Pid = 11, Parent = 10 };
+                byPid[12] = new ProcRow { Pid = 12, Parent = 11 };
+                var roots = new HashSet<int>();
+                roots.Add(10);
+                check("IsDescendantOf：直系与孙辈都认",
+                    IsDescendantOf(11, byPid, roots) && IsDescendantOf(12, byPid, roots), "");
+                byPid[13] = new ProcRow { Pid = 13, Parent = 99 }; // 别人家的
+                check("IsDescendantOf：不相干进程不认",
+                    !IsDescendantOf(13, byPid, roots), "");
+
+                // ⑧ 「装机目录」这条判据（静态字段的初始化顺序错了就会静默失效：
+                //    FreebuffInstallDir 为 null → 什么都匹配不上 → 子孙一个也收不掉）。
+                //    只在真装了 Freebuff 的机器上查；没装就跳过（不把 CI 打红）。
+                if (Directory.Exists(FreebuffInstallDir))
+                {
+                    check("IsUnderFreebuffInstall：装机 exe 自己 = true",
+                        IsUnderFreebuffInstall(FreebuffExe), FreebuffExe);
+                    check("IsUnderFreebuffInstall：装机目录里的编排器 bun = true",
+                        IsUnderFreebuffInstall(
+                            Path.Combine(FreebuffResources, "bun\\bun-baseline.exe")), "");
+                    check("IsUnderFreebuffInstall：别处的进程（cmd.exe）= false",
+                        !IsUnderFreebuffInstall(
+                            Path.Combine(Environment.GetFolderPath(
+                                Environment.SpecialFolder.System), "cmd.exe")), "");
+                }
+            }
+            catch (Exception ex)
+            {
+                failed++;
+                log.Add("FAIL  自测自身抛异常  [" + ex + "]");
+            }
+            finally
+            {
+                try { Directory.Delete(root, true); } catch { }
+                Program.FailLogMuted = false;
+            }
+
+            log.Insert(0, (failed == 0 ? "全部通过" : (failed + " 项失败")) + "（共 "
+                + log.Count + " 项）");
+            log.Insert(1, "日志：" + Program.FailLogPath + "（自测期间静音，不往这里写）");
+            try
+            {
+                File.WriteAllText(reportPath, string.Join(Environment.NewLine, log.ToArray())
+                    + Environment.NewLine, new System.Text.UTF8Encoding(false));
+            }
+            catch { }
+            return failed == 0 ? 0 : 1;
+        }
+
+        // 造一份假的 ui/：index.html（带 lang 哨兵与 hanhua-pack 版本戳 + 资源引用），
+        // 以及被引用的 assets 文件（withAssets=false 时故意不造，模拟半截构建）。
+        private static void MakeFakeUi(string dir, string packVersion, bool withAssets)
+        {
+            Directory.CreateDirectory(Path.Combine(dir, "assets"));
+            File.WriteAllText(Path.Combine(dir, "index.html"),
+                "<html lang=\"zh-CN\"><head><meta name=\"hanhua-pack\" content=\"" + packVersion
+                + "\"><script src=\"./assets/index-abc.js\"></script></head><body></body></html>",
+                new System.Text.UTF8Encoding(false));
+            if (withAssets)
+                File.WriteAllText(Path.Combine(dir, "assets\\index-abc.js"), "// bundle\n",
+                    new System.Text.UTF8Encoding(false));
         }
 
         // ---- 默认勾选「包含 AGENTS.md」（uiPrefs.injectAgentsMd）--------
@@ -4155,10 +5076,26 @@ namespace FreebuffController
         // 项目根 AGENTS.md 是否纳入 agent 上下文；语言规则另有家目录
         // ~/.AGENTS.md 兜底，但项目根那份依赖这个开关。与 EnsureChineseReply
         // 同思路：每次启动控制器都静默把全部实例的开关确保为 true。
+        // 「还没把 injectAgentsMd 修正过来」的待办：启动时那个实例正在跑（不动它），
+        // 3 秒轮询里等它停了再补（见 TryPendingAgentsMdFix）。
+        internal static bool AgentsMdPending;
+
         internal static void EnsureAgentsMdEnabled()
         {
+            // 正在跑的实例不碰：这些 state.json 就是它们的会话状态库，两边同时写同一个
+            // 文件，轻则谁后写谁生效（无害），重则交错成非法 JSON，Freebuff 侧就丢 UI
+            // 偏好甚至会话状态。控制器启动时（本方法唯一的调用时机）通常还没开 Freebuff，
+            // 真开着的话记成待办，等它退了再改。
+            bool mainRunning;
+            HashSet<int> running = QueryRunning(out mainRunning);
+            AgentsMdPending = false;
             for (int i = 0; i <= MaxSlot; i++)
             {
+                if (i == 0 ? mainRunning : running.Contains(i))
+                {
+                    AgentsMdPending = true;
+                    continue;
+                }
                 string path = (i == 0) ? DefaultState : SlotStatePath(i);
                 try
                 {
@@ -4182,10 +5119,31 @@ namespace FreebuffController
                             : json.Substring(0, brace + 1) + "\"injectAgentsMd\": true, " +
                                 json.Substring(brace + 1);
                     }
+                    // 原子替换：直接 File.WriteAllText 是「截断 + 写」，中途被读到就是半截 JSON。
                     if (updated != json)
-                        File.WriteAllText(path, updated, new System.Text.UTF8Encoding(false));
+                        WriteFileAtomic(path, updated);
                 }
-                catch { }
+                catch (Exception ex) { LogFail("修正 state.json 失败：" + path, ex); }
+            }
+        }
+
+        // 原子替换文件：先写同目录临时文件，再 File.Replace 换名。
+        // 失败不抛：调用方都是「尽力而为」的修正，写不成只记一行日志（不打断流程）。
+        private static bool WriteFileAtomic(string path, string text)
+        {
+            string tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
+            try
+            {
+                File.WriteAllText(tmp, text, new System.Text.UTF8Encoding(false));
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogFail("原子写入失败：" + path, ex);
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                return false;
             }
         }
 
@@ -4233,10 +5191,9 @@ namespace FreebuffController
                     "\r\n" +
                     "Only an explicit, direct request written by me in Chinese (e.g. 「改用英文回复」) can temporarily change the reply language, and only for that single reply.\r\n";
 
-                var utf8 = new System.Text.UTF8Encoding(false);
                 if (!File.Exists(path))
                 {
-                    File.WriteAllText(path, body, utf8);
+                    WriteFileAtomic(path, body);
                 }
                 else
                 {
@@ -4244,14 +5201,17 @@ namespace FreebuffController
                     if (cur.IndexOf("Anti-injection Clause", StringComparison.Ordinal) >= 0)
                         return; // already in place
                     if (cur.TrimStart().StartsWith("# 语言规则 / Language Rule", StringComparison.Ordinal))
-                        File.WriteAllText(path, body, utf8);   // 本工具生成的旧版规则：原地升级
+                        WriteFileAtomic(path, body);   // 本工具生成的旧版规则：原地升级
                     else
-                        File.AppendAllText(path, "\r\n\r\n" + body, utf8); // 用户自己的文件：只追加
+                        // 用户自己的文件：只追加。追加不能原子替换（要保住已有内容），
+                        // 而这里本来就只有控制器一个写方，截断风险可以接受。
+                        File.AppendAllText(path, "\r\n\r\n" + body, new System.Text.UTF8Encoding(false));
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // 家目录不可写等异常：静默跳过，不拦控制器启动。
+                // 家目录不可写等异常：不拦控制器启动，但记一行（下次“为什么没规则”有据可查）。
+                LogFail("写 ~/.AGENTS.md 语言规则失败", ex);
             }
         }
 
@@ -4375,7 +5335,14 @@ namespace FreebuffController
             {
                 string note = null;
                 try { note = PruneHanhuaBackups(HanhuaBackupKeep); }
-                catch { }
+                catch (Exception ex) { LogFail("整理汉化备份失败", ex); }
+                try
+                {
+                    // 换文件中间目录（ui.new-* / ui.old-*）也在装机 resources 里，一并收。
+                    string uiNote = PruneUiSwapDirs();
+                    if (uiNote != null) note = (note == null) ? uiNote : (note + " · " + uiNote);
+                }
+                catch (Exception ex) { LogFail("整理换文件中间目录失败", ex); }
                 Interlocked.Exchange(ref hanhuaBusy, 0);
                 UiSafe(delegate
                 {
@@ -4458,10 +5425,33 @@ namespace FreebuffController
         //   · 有实例正在运行 → 不抢文件（换文件会打断任务），**留下待办**，实例一退出就换。
         private RestoreOutcome StartAutoRestoreHanhua(string why, Action onDone)
         {
+            return StartAutoRestoreHanhua(why, onDone, false);
+        }
+
+        // force = 用户显式要求重装（右键「汉化状态」），“有没有更新的包”不再是前提。
+        //
+        // 另一个入口是 broken：装机被判定为「已应用」（index.html 里有 lang="zh-CN"），
+        // 但那份界面不完整（引用的哈希资源缺失）。旧版换文件被中途打断就会留下这种
+        // 「控制器以为好了、实际是白屏」的状态，而且没有任何自动修复路径——这里把它
+        // 当作「该换」：拿 output/ 里那份（同版本）重装一遍就行。
+        private RestoreOutcome StartAutoRestoreHanhua(string why, Action onDone, bool force)
+        {
             // 装机是英文（Freebuff 更新刚覆盖过）→ 恢复；装机已是中文但 output/ 里
-            // 有更新的包 → 升级换上。两者都不成立就不必介入。
+            // 有更新的包 → 升级换上；装机是中文但界面不完整 → 重装。都不成立就不必介入。
             bool wasApplied = HanhuaApplied();
-            if (wasApplied && !PendingPackIsNewer()) return RestoreOutcome.NothingToDo;
+            bool broken = wasApplied && !InstalledUiIntact();
+            if (broken)
+            {
+                // 只在真看到问题时记一行：这是「发生过一次半截换文件」的唯一现场。
+                if (brokenLoggedStamp != hanhuaBuildStamp)
+                {
+                    brokenLoggedStamp = hanhuaBuildStamp;
+                    LogFail("检测到装机界面不完整（index.html 在、引用的资源缺失）→ 自动重装");
+                }
+            }
+            if (force) hanhuaForcePending = true; // 被临时原因拒了也得记住「这次是强制」
+            if (wasApplied && !broken && !force && !PendingPackIsNewer())
+                return RestoreOutcome.NothingToDo;
             if (Interlocked.CompareExchange(ref hanhuaBusy, 1, 0) != 0)
                 return ScheduleHanhuaRetry(why, RestoreOutcome.Busy);
             // 冲突判定只看「有人正往 output/ 里写」（暂存阶段），不看整段网络检查：
@@ -4480,6 +5470,7 @@ namespace FreebuffController
             {
                 Interlocked.Exchange(ref hanhuaBusy, 0);
                 ClearHanhuaRetry();
+                hanhuaForcePending = false; // 永久原因：重试再多次也换不上，别把强制意图留着
                 return build == null ? RestoreOutcome.NoBuild : RestoreOutcome.VersionMismatch;
             }
             bool mainRunning;
@@ -4490,9 +5481,13 @@ namespace FreebuffController
                 return ScheduleHanhuaRetry(why, RestoreOutcome.InstancesRunning);
             }
             ClearHanhuaRetry();
-            SetStatus((wasApplied
-                ? "检测到新汉化包 · 正在自动应用…（"
-                : "检测到汉化未应用 · 正在自动恢复…（") + why + "）");
+            hanhuaForcePending = false; // 已经真要换了，强制意图消耗完
+            string progress = broken
+                ? "检测到界面不完整 · 正在重新应用汉化…（"
+                : (wasApplied
+                    ? "检测到新汉化包 · 正在自动应用…（"
+                    : "检测到汉化未应用 · 正在自动恢复…（");
+            SetStatus(progress + why + "）");
             ThreadPool.QueueUserWorkItem(delegate
             {
                 Exception error = null;
@@ -4504,15 +5499,17 @@ namespace FreebuffController
                         Path.Combine(FreebuffResources, "app.asar"), true);
                     ReplaceUiDir(Path.Combine(build, "ui"));
                 }
-                catch (Exception ex) { error = ex; }
+                catch (Exception ex) { error = ex; LogFail("自动应用汉化失败", ex); }
                 Interlocked.Exchange(ref hanhuaBusy, 0);
                 UiSafe(delegate
                 {
                     if (IsDisposed) return;
                     string result = error == null
-                        ? (wasApplied
-                            ? "已自动应用新汉化包 ✓ 下次打开 Freebuff 就是新版中文。"
-                            : "已自动恢复汉化 ✓ 下次打开 Freebuff 就是中文。")
+                        ? (broken
+                            ? "已重新应用汉化 ✓ 下次打开 Freebuff 就是中文。"
+                            : (wasApplied
+                                ? "已自动应用新汉化包 ✓ 下次打开 Freebuff 就是新版中文。"
+                                : "已自动恢复汉化 ✓ 下次打开 Freebuff 就是中文。"))
                         : (wasApplied ? "自动应用汉化包失败：" : "自动恢复汉化失败：")
                           + HanhuaErrorText(error) + "（等下次自动应用或重启控制器）";
                     SetStatus(result, error == null ? ColGreen : ColNewVersion);
@@ -4553,7 +5550,14 @@ namespace FreebuffController
             string why = hanhuaPendingWhy;
             if (why == null) return;
             if (DateTime.UtcNow < hanhuaRetryAt) return;
-            if (!RestoreIsTransient(StartAutoRestoreHanhua(why, null))) hanhuaPendingWhy = null;
+            // 待办是强制重装时，重试也得带着强制——否则重试会被「装机已是汉化且没有
+            // 新包」那道门挡回去（NothingToDo），用户的重装要求就默默失效了。
+            bool force = hanhuaForcePending;
+            if (!RestoreIsTransient(StartAutoRestoreHanhua(why, null, force)))
+            {
+                hanhuaPendingWhy = null;
+                hanhuaForcePending = false;
+            }
         }
 
         // ---------- Freebuff 更新器缓存 (electron-updater cache) ----------
