@@ -92,7 +92,9 @@ FreebuffController.exe --self-test %TEMP%\selftest.txt && type %TEMP%\selftest.t
 ```
 ├── FreebuffController.cs   # 全部源码（UI + 逻辑）
 ├── handover-merge.js       # 会话共享迁移脚本（编译时内嵌进 exe）
+├── CHANGELOG.md            # 逐版改动（发布时自动当 Release 说明）
 ├── build.bat               # 一键编译脚本
+├── release.sh              # 发版：编译 + 打 tag + 上传 exe 与 sha512.txt
 ├── tools/
 │   └── embed-handover.py   # 编译前把 handover-merge.js 内嵌进 C# 源码
 └── app.ico                 # 应用图标
@@ -100,7 +102,8 @@ FreebuffController.exe --self-test %TEMP%\selftest.txt && type %TEMP%\selftest.t
 
 ## 版本记录 / Changelog
 
-逐版本改动见 [Releases](https://github.com/Ximmmmmmm/freebuff-controller/releases) 与 `git log`。
+见 [CHANGELOG.md](CHANGELOG.md)：每版一条「改了什么 + 对用的你有什么影响」，
+发版时那一节就是 [Releases](https://github.com/Ximmmmmmm/freebuff-controller/releases) 页上的说明。
 
 ## License
 

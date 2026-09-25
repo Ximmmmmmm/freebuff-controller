@@ -44,7 +44,20 @@ if gh release view "${TAG}" -R "${REPO}" >/dev/null 2>&1; then
   exit 1
 fi
 
+# Release 说明取自 CHANGELOG.md 里本版那一节（## vX.Y.Z 到下一个 ## 之间）。
+# 没那一节就直接中止：Release 页是给用户看的，宁可现在补一行，也不让它变成空话/旧话。
+NOTES="$(awk -v ver="${TAG}" '
+  $0 ~ ("^## " ver "([ ·]|$)") { found = 1; next }
+  found && /^## / { exit }
+  found { print }
+' CHANGELOG.md)"
+if [ -z "$(printf '%s' "${NOTES}" | tr -d '[:space:]')" ]; then
+  echo "ERROR: CHANGELOG.md 里没有 ${TAG} 一节，无法生成 Release 说明。" >&2
+  echo "  按时间倒序在顶部补一节（改了什么 + 对用户的影响），标题写成「## ${TAG} · $(date +%F)」再重跑。" >&2
+  exit 1
+fi
+
 gh release create "${TAG}" "${HERE}/FreebuffController.exe" "${HERE}/sha512.txt" -R "${REPO}" \
   --title "Freebuff 多开控制器 v${VER}" \
-  --notes "单文件 exe（约 195 KB，无运行时依赖），下载即用：多实例独立数据目录 + 独立账号 + 会话共享 + 汉化包自动恢复 + 代理接入。逐版改动见仓库提交记录与 README。"
+  --notes "${NOTES}"
 echo "已发布 ${TAG}。"
