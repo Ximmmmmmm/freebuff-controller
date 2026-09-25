@@ -28,8 +28,8 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
-[assembly: System.Reflection.AssemblyVersion("1.9.5.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.5.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.6.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.6.0")]
 
 namespace FreebuffController
 {
@@ -4015,10 +4015,15 @@ namespace FreebuffController
                 try
                 {
                     noProxy = !ControllerProxyRoute(out routeKind, out routeAddr);
+                    // 额度接口慢（服务端实测 12~21s/请求），串行拉 N 个账号就是 N 倍
+                    // 等待；v1.9.6 起各账号并发拉，回一个填一个（渐进刷进表格），
+                    // 一轮总耗时约等于最慢的那一个账号。候选链 / 30s 超时 / 离线跳过语义不动。
+                    List<int> list = new List<int>();
                     for (int i = 0; i <= 9; i++)
                     {
                         if (base.IsDisposed)
                         {
+                            Interlocked.Exchange(ref quotaBusy, 0);
                             return;
                         }
                         string text = ReadTokenFor(i);
@@ -4035,51 +4040,91 @@ namespace FreebuffController
                         }
                         else
                         {
-                            quotaInfos[i] = FetchQuota(text);
+                            list.Add(i);
                         }
+                    }
+                    if (list.Count == 0)
+                    {
+                        FinishQuotaRound(noProxy, routeKind, routeAddr, force, announce);
+                        return;
+                    }
+                    int[] pending = new int[1] { list.Count };
+                    foreach (int idx in list)
+                    {
+                        int slot = idx;
+                        string token = ReadTokenFor(slot);
+                        ThreadPool.QueueUserWorkItem(delegate
+                        {
+                            try
+                            {
+                                quotaInfos[slot] = FetchQuota(token);
+                            }
+                            catch
+                            {
+                                quotaInfos[slot] = new QuotaInfo
+                                {
+                                    Text = "获取失败"
+                                };
+                            }
+                            UiSafe(delegate
+                            {
+                                if (!base.IsDisposed)
+                                {
+                                    ApplyQuotaColumn();
+                                }
+                            });
+                            if (Interlocked.Decrement(ref pending[0]) == 0)
+                            {
+                                FinishQuotaRound(noProxy, routeKind, routeAddr, force, announce);
+                            }
+                        });
                     }
                 }
                 catch
                 {
-                }
-                finally
-                {
-                    if (!noProxy)
-                    {
-                        lastQuotaFetch = DateTime.Now;
-                    }
                     Interlocked.Exchange(ref quotaBusy, 0);
                 }
-                if (base.IsDisposed || !base.IsHandleCreated)
+            });
+        }
+
+        // 一轮额度刷新的收尾（最后一个账号落定后恰好跑一次）：节流标记、
+        // quotaBusy 解锁、状态行回执。
+        private void FinishQuotaRound(bool noProxy, string routeKind, string routeAddr, bool force, bool announce)
+        {
+            if (!noProxy)
+            {
+                lastQuotaFetch = DateTime.Now;
+            }
+            Interlocked.Exchange(ref quotaBusy, 0);
+            if (base.IsDisposed || !base.IsHandleCreated)
+            {
+                return;
+            }
+            try
+            {
+                BeginInvoke((MethodInvoker)delegate
                 {
-                    return;
-                }
-                try
-                {
-                    BeginInvoke((MethodInvoker)delegate
+                    if (!base.IsDisposed)
                     {
-                        if (!base.IsDisposed)
+                        ApplyProxyStatus(!noProxy, routeKind, routeAddr);
+                        ApplyQuotaColumn();
+                        if (noProxy)
                         {
-                            ApplyProxyStatus(!noProxy, routeKind, routeAddr);
-                            ApplyQuotaColumn();
-                            if (noProxy)
+                            if (force && announce)
                             {
-                                if (force && announce)
-                                {
-                                    SetStatus("未连接代理 · 已跳过额度刷新（连上代理后自动恢复）", ColNewVersion);
-                                }
-                            }
-                            else if (force && announce)
-                            {
-                                SetStatus("额度已刷新 ✓" + RouteText());
+                                SetStatus("未连接代理 · 已跳过额度刷新（连上代理后自动恢复）", ColNewVersion);
                             }
                         }
-                    });
-                }
-                catch
-                {
-                }
-            });
+                        else if (force && announce)
+                        {
+                            SetStatus("额度已刷新 ✓" + RouteText());
+                        }
+                    }
+                });
+            }
+            catch
+            {
+            }
         }
 
         private void ApplyQuotaColumn()
