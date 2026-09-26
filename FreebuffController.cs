@@ -28,8 +28,8 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
-[assembly: System.Reflection.AssemblyVersion("1.9.6.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.6.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.7.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.7.0")]
 
 namespace FreebuffController
 {
@@ -4631,7 +4631,7 @@ namespace FreebuffController
                                 }
                                 else
                                 {
-                                    string text2 = "有新版本 v" + latestVersion + " · 点此下载安装包（装完自动换回中文）";
+                                    string text2 = "有新版本 v" + latestVersion + " · 点此下载安装包（会先停掉实例再装，装完自动换回中文）";
                                     SetStatusAction(text2, ColNewVersion);
                                     TrayNotify("Freebuff 有新版本 v" + latestVersion + "，点控制器窗口下方那行字即可下载。" + text);
                                 }
@@ -4686,7 +4686,7 @@ namespace FreebuffController
         {
             if (updateStarted)
             {
-                Info("安装包已启动，请按安装程序的提示完成更新。\r\n若提示 Freebuff 正在运行，请先在列表里“停止全部”。");
+                Info("安装包已启动，请按安装程序的提示完成更新。\r\n（启动前控制器已替你停掉所有实例；若安装程序仍说被占用，点一下列表里的“停止全部”再装一次。）");
             }
             else if (updateFailed)
             {
@@ -4721,6 +4721,10 @@ namespace FreebuffController
             {
                 Exception error = null;
                 string installerPath = null;
+                string skippedVersion = null;
+                string downloadVersion = null;
+                int instancesBefore = 0;
+                int sweptCount = 0;
                 try
                 {
                     string text = FetchUrlBody(ReadUpdateFeedUrl());
@@ -4730,6 +4734,7 @@ namespace FreebuffController
                     }
                     Match match = YamlPathRegex.Match(text);
                     Match match2 = YamlShaRegex.Match(text);
+                    Match match3 = YamlVersionRegex.Match(text);
                     if (!match.Success || !match2.Success)
                     {
                         throw new ApplicationException("latest.yml 缺少安装包路径或 SHA512，已停止下载");
@@ -4739,6 +4744,14 @@ namespace FreebuffController
                     if (!IsSha512Base64(text3))
                     {
                         throw new ApplicationException("latest.yml 中的 SHA512 无效，已停止下载");
+                    }
+                    downloadVersion = (match3.Success ? match3.Groups[1].Value.Trim() : latestVersion);
+                    // 别做无用功：Feed 里这一版要是本机已经装上了（Freebuff 自己的更新器常常先装掉），
+                    // 就别再下一遍 170 MB，更别把安装程序拉起来让它弹「正在运行」。
+                    if (InstalledAtLeast(downloadVersion))
+                    {
+                        skippedVersion = downloadVersion;
+                        return;
                     }
                     string text4 = FeedBase() + "/" + text2;
                     string text5 = (installerPath = Path.Combine(Path.GetTempPath(), text2));
@@ -4757,6 +4770,15 @@ namespace FreebuffController
                             }
                         });
                     });
+                    // 安装程序一看到 Freebuff 还在跑就弹「正在运行 / 被占用」，还要你自己去关窗口。
+                    // 这里替你做掉：先礼后兵地停掉全部实例（顺手收掉残留的 bun 编排器），
+                    // 等装机目录真没人占着，再启动安装包。
+                    instancesBefore = CountRunningInstances();
+                    sweptCount = KillInstances(true, AllTargets());
+                    if (!WaitInstallDirQuiet(10000))
+                    {
+                        LogFail("启动安装包前装机目录里还有进程没退干净（安装程序可能仍提示占用）");
+                    }
                     try
                     {
                         Process.Start(text5);
@@ -4771,7 +4793,20 @@ namespace FreebuffController
                     error = ex2;
                 }
                 Interlocked.Exchange(ref updateBusy, 0);
-                if (error == null)
+                if (error == null && skippedVersion != null)
+                {
+                    UiSafe(delegate
+                    {
+                        if (!base.IsDisposed)
+                        {
+                            updateStarted = false;
+                            updateFailed = false;
+                            RefreshInstalledVersion();
+                            SetStatus("Freebuff v" + skippedVersion + " 已经装上了，不用再装一遍 ✓", ColGreen);
+                        }
+                    });
+                }
+                else if (error == null)
                 {
                     UiSafe(delegate
                     {
@@ -4779,9 +4814,9 @@ namespace FreebuffController
                         {
                             updateStarted = true;
                             ApplyVersionUi(false);
-                            SavePendingInstaller(latestVersion, installerPath);
-                            SetStatus("Freebuff 安装包已下载并启动，按提示完成安装。若提示 Freebuff 正在运行，请先“停止全部”。", ColGreen);
-                            TrayNotify("Freebuff 安装包已下载并启动，按安装程序的提示完成更新。");
+                            SavePendingInstaller(downloadVersion, installerPath);
+                            SetStatus(((instancesBefore > 0) ? ("已先停掉 " + instancesBefore + " 个实例 · ") : "") + "安装包已启动，按提示完成安装" + ((sweptCount > 0) ? ("（顺带收掉 " + sweptCount + " 个残留进程）") : ""), ColGreen);
+                            TrayNotify(((instancesBefore > 0) ? ("已停掉 " + instancesBefore + " 个实例，") : "") + "Freebuff v" + downloadVersion + " 安装程序已启动，按提示完成更新。");
                         }
                     });
                 }
@@ -5410,12 +5445,7 @@ namespace FreebuffController
             int num = 0;
             try
             {
-                string[] array = new string[10] { "main", null, null, null, null, null, null, null, null, null };
-                for (int i = 1; i <= 9; i++)
-                {
-                    array[i] = i.ToString();
-                }
-                num = KillInstances(true, array);
+                num = KillInstances(true, AllTargets());
             }
             catch (Exception ex)
             {
@@ -6199,6 +6229,76 @@ namespace FreebuffController
             ApplyLaunchProxy(processStartInfo, url);
             RememberLaunchProxy(n, url);
             Process.Start(processStartInfo);
+        }
+
+        // 「停止全部」用的目标集合：主实例 + 实例 1~9。
+        private static string[] AllTargets()
+        {
+            string[] array = new string[10];
+            array[0] = "main";
+            for (int i = 1; i <= 9; i++)
+            {
+                array[i] = i.ToString();
+            }
+            return array;
+        }
+
+        // 现在有几个 Freebuff 实例在跑（安装前后报数用）。
+        private static int CountRunningInstances()
+        {
+            int num = 0;
+            try
+            {
+                using (ManagementObjectSearcher managementObjectSearcher = new ManagementObjectSearcher("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='Freebuff.exe'"))
+                {
+                    foreach (ManagementObject item in managementObjectSearcher.Get())
+                    {
+                        if (IsOwnFreebuffProcess(item))
+                        {
+                            num++;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogFail("数运行中的实例失败", ex);
+            }
+            return num;
+        }
+
+        // 本机装的版本已经追平目标版本了吗？（Feed 里这一版可能早就装上了）
+        private static bool InstalledAtLeast(string version)
+        {
+            Version version2 = ParseLooseVersion(version);
+            Version version3 = ParseLooseVersion(ReadInstalledVersion());
+            return version2 != null && version3 != null && version3.CompareTo(version2) >= 0;
+        }
+
+        // 启动安装包之前，等装机目录彻底没人占着。
+        // 官方 NSIS 安装程序只认「Freebuff.exe 还在跑」，看到就弹「正在运行 / 被占用」；
+        // 而真正让文件忙的是编排器 bun.exe（住在 resources 下），它不归安装程序管——这里替它管。
+        private static bool WaitInstallDirQuiet(int ms)
+        {
+            int num = 0;
+            while (true)
+            {
+                bool flag = false;
+                foreach (ProcRow item in SnapshotProcessTable())
+                {
+                    if (item.Pid != 0 && IsUnderFreebuffInstall(item.Exe))
+                    {
+                        flag = true;
+                        break;
+                    }
+                }
+                if (!flag || num >= ms)
+                {
+                    return !flag;
+                }
+                Thread.Sleep(200);
+                num += 200;
+            }
         }
 
         private static void KillInstances(params string[] targets)
@@ -8213,6 +8313,10 @@ namespace FreebuffController
         private void AutoCleanUnusedFiles(string why)
         {
             RefreshInstalledVersion();
+            // 先把 pending-installer.txt 记着的那份结掉：控制器重启后 updateStarted 已归零，
+            // CleanupAfterUpdate 那条路永远够不着它，而扫描又规定了「记录里的那一份不碰」——
+            // 不管的话，装完的包会一直躺在 %TEMP% 里（实测一份 171 MB 能躺一整天）。
+            PruneDownloadedInstaller();
             List<string> doomed;
             long reclaimable;
             long total;
@@ -8257,7 +8361,6 @@ namespace FreebuffController
 
         private void CleanupAfterUpdate()
         {
-            PruneDownloadedInstaller();
             AutoCleanUnusedFiles("Freebuff 更新装完");
             Delay(20000, delegate
             {
