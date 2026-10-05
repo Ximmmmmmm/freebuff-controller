@@ -28,8 +28,8 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
-[assembly: System.Reflection.AssemblyVersion("1.9.7.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.7.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.10.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.10.0")]
 
 namespace FreebuffController
 {
@@ -86,6 +86,18 @@ namespace FreebuffController
 
         [DllImport("user32.dll")]
         internal static extern bool BringWindowToTop(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        internal static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll")]
+        internal static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        internal const uint MOD_ALT = 0x0001;
+        internal const uint MOD_CONTROL = 0x0002;
+        internal const uint MOD_SHIFT = 0x0004;
+        internal const uint MOD_WIN = 0x0008;
+        internal const int WM_HOTKEY = 0x0312;
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetWindowTextW(IntPtr hwnd, StringBuilder text, int max);
@@ -2095,13 +2107,37 @@ namespace FreebuffController
                 portProbeLabel.Text = "端口探测中…";
                 ThreadPool.QueueUserWorkItem(delegate
                 {
-                    StringBuilder stringBuilder = new StringBuilder("端口探测：");
-                    for (int i = 0; i < AutoDetectPorts.Length; i++)
+                    // 并行探：串行时死端口一个个吃满 500ms 超时，5 个端口要 2.4s 才出结果。
+                    int[] ports = AutoDetectPorts;
+                    bool[] flags = new bool[ports.Length];
+                    int remaining = ports.Length;
+                    for (int i = 0; i < ports.Length; i++)
                     {
-                        string url = "http://127.0.0.1:" + AutoDetectPorts[i];
-                        bool flag = ProxyAlive(url) && (!functional || ProxyFunctional(url));
-                        stringBuilder.Append(AutoDetectPorts[i]).Append(flag ? " ✓" : " ✗");
-                        if (i < AutoDetectPorts.Length - 1)
+                        int index = i;
+                        ThreadPool.QueueUserWorkItem(delegate
+                        {
+                            try
+                            {
+                                string url = "http://127.0.0.1:" + ports[index];
+                                flags[index] = ProxyAlive(url) && (!functional || ProxyFunctional(url));
+                            }
+                            catch
+                            {
+                            }
+                            Interlocked.Decrement(ref remaining);
+                        });
+                    }
+                    int num = 0;
+                    while (remaining > 0 && num < 4000)
+                    {
+                        Thread.Sleep(20);
+                        num += 20;
+                    }
+                    StringBuilder stringBuilder = new StringBuilder("端口探测：");
+                    for (int j = 0; j < ports.Length; j++)
+                    {
+                        stringBuilder.Append(ports[j]).Append(flags[j] ? " ✓" : " ✗");
+                        if (j < ports.Length - 1)
                         {
                             stringBuilder.Append(" · ");
                         }
@@ -2392,6 +2428,21 @@ namespace FreebuffController
 
         private static int detectBusy;
 
+        // 上次探测成功的本地代理端口。本机对「已关闭端口」的 TCP 拒绝要 ~2 秒才回来，
+        // 而 ProxyAlive 只等 500ms —— 所以每多探一个死端口就白花 500ms。把它排到最前，
+        // 有代理时能把整轮探测从 1.3s 压到 ~0.4s。
+        private static volatile int lastGoodLocalProxyPort;
+
+        // 端口探测的并行等待上限：5 个端口同时探，正常 ~0.5s 就全部返回，这里只兜底。
+        private const int ProxyProbeBudgetMs = 1500;
+
+        // 上次完整扫描 5 个端口的时间，以及两次扫描之间的最小间隔。
+        // 没连代理时，ControllerProxyRoute 的每个调用方都会各自扫一遍（RefreshProxyStatusAsync
+        // / WatchProxyHealth / 额度轮次……），而探头对死端口要吃满 500ms 超时。
+        private static DateTime lastLocalProxyScanAt = DateTime.MinValue;
+
+        private const int LocalProxyScanMinIntervalMs = 55000;
+
         private static readonly Dictionary<int, string> launchProxyBySlot = new Dictionary<int, string>();
 
         private static readonly object launchProxyLock = new object();
@@ -2478,14 +2529,87 @@ namespace FreebuffController
             BuildUi();
         }
 
+        private readonly HashSet<int> notifiedExhaustedSlots = new HashSet<int>();
+
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
             ApplyLightTitleBar(base.Handle);
+            RegisterGlobalHotkeys();
+        }
+
+        private void RegisterGlobalHotkeys()
+        {
+            try
+            {
+                // Alt+0: 呼出/收起多开控制器
+                Program.RegisterHotKey(base.Handle, 1000, Program.MOD_ALT, 0x30);
+                // Alt+1 ~ Alt+9: 快速切到 Slot 1 ~ Slot 9
+                for (int i = 1; i <= 9; i++)
+                {
+                    Program.RegisterHotKey(base.Handle, 1000 + i, Program.MOD_ALT, (uint)(0x30 + i));
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void UnregisterGlobalHotkeys()
+        {
+            try
+            {
+                for (int i = 0; i <= 9; i++)
+                {
+                    Program.UnregisterHotKey(base.Handle, 1000 + i);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == Program.WM_HOTKEY)
+            {
+                int id = m.WParam.ToInt32();
+                if (id == 1000)
+                {
+                    ToggleControllerWindow();
+                }
+                else if (id >= 1001 && id <= 1009)
+                {
+                    int slot = id - 1000;
+                    LaunchIndex(slot);
+                }
+            }
+            base.WndProc(ref m);
+        }
+
+        private void ToggleControllerWindow()
+        {
+            try
+            {
+                if (Visible && WindowState != FormWindowState.Minimized && Form.ActiveForm == this)
+                {
+                    WindowState = FormWindowState.Minimized;
+                }
+                else
+                {
+                    Show();
+                    WindowState = FormWindowState.Normal;
+                    Program.ForceForeground(base.Handle);
+                }
+            }
+            catch
+            {
+            }
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            UnregisterGlobalHotkeys();
             SaveWindowPos();
             if (statusRevertTimer != null)
             {
@@ -2546,8 +2670,8 @@ namespace FreebuffController
             base.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             hintLabel = new Label();
             hintLabel.AutoSize = false;
-            hintLabel.Text = "双击行启动";
-            hintLabel.Bounds = new Rectangle(20, 14, 76, 20);
+            hintLabel.Text = "双击启动 · Alt+0 控制器 · Alt+1~9 切号";
+            hintLabel.Bounds = new Rectangle(20, 14, 280, 20);
             hintLabel.ForeColor = ColSub;
             base.Controls.Add(hintLabel);
             // 代理状态不占窗口：实时状态与逐端口探测都在「代理设置」对话框里，
@@ -2973,6 +3097,20 @@ namespace FreebuffController
         private void BuildGrid()
         {
             grid = new DataGridView();
+            // DataGridView.DoubleBuffered 是 protected，只能反射打开。实测这台机器上
+            // 10 行的全量重绘要 17ms（占整窗重绘的 66%），不开缓冲时每 3 秒的单元格
+            // 更新都会闪一下。
+            try
+            {
+                PropertyInfo property = typeof(DataGridView).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic);
+                if (property != null)
+                {
+                    property.SetValue(grid, true, null);
+                }
+            }
+            catch
+            {
+            }
             grid.Location = new Point(20, 44);
             grid.Size = new Size(540, 444);
             grid.ScrollBars = ScrollBars.None;
@@ -3535,6 +3673,7 @@ namespace FreebuffController
             localProxyMode = text;
             manualProxyUrl = text2;
             stickyRoute = null;
+            lastLocalProxyScanAt = DateTime.MinValue;
         }
 
         private static void WriteProxyConfig(string content)
@@ -3764,26 +3903,107 @@ namespace FreebuffController
                 {
                 }
                 detectedProxyUrl = text;
+                lastLocalProxyScanAt = DateTime.UtcNow;
                 Interlocked.Exchange(ref detectBusy, 0);
             });
         }
 
+        // 探测本地代理：端口按「上次成功的排最前」排序，并且 5 个端口并行探。
+        // 串行时最坏 5 × 500ms = 2.5s（死端口要吃满超时），并行后只等最慢的那一个。
         private static string ProbeLocalProxy()
         {
-            int[] autoDetectPorts = AutoDetectPorts;
-            foreach (int num in autoDetectPorts)
+            int[] ports = OrderedLocalProxyPorts();
+            string[] found = new string[ports.Length];
+            bool[] finished = new bool[ports.Length];
+            int remaining = ports.Length;
+            for (int i = 0; i < ports.Length; i++)
             {
-                string text = "http://127.0.0.1:" + num;
-                if (ProxyAlive(text) && ProxyFunctional(text))
+                int index = i;
+                ThreadPool.QueueUserWorkItem(delegate
                 {
-                    return text;
+                    try
+                    {
+                        string text = "http://127.0.0.1:" + ports[index];
+                        if (ProxyAlive(text) && ProxyFunctional(text))
+                        {
+                            found[index] = text;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                    finished[index] = true;
+                    Interlocked.Decrement(ref remaining);
+                });
+            }
+            int num = 0;
+            while (remaining > 0 && num < ProxyProbeBudgetMs)
+            {
+                // 若首选候选（即上次成功的那个）已经探测成功，优先级最高，直接短路跳出
+                if (found[0] != null)
+                {
+                    break;
+                }
+                // 通用短路判断：若某个优先级高的端口已经成功，且它前面所有端口均已探测结束，则该端口必胜
+                bool canBreak = false;
+                for (int j = 0; j < found.Length; j++)
+                {
+                    if (found[j] != null)
+                    {
+                        canBreak = true;
+                        break;
+                    }
+                    if (!finished[j])
+                    {
+                        break;
+                    }
+                }
+                if (canBreak)
+                {
+                    break;
+                }
+                Thread.Sleep(20);
+                num += 20;
+            }
+            for (int j = 0; j < found.Length; j++)
+            {
+                if (found[j] != null)
+                {
+                    lastGoodLocalProxyPort = ports[j];
+                    return found[j];
                 }
             }
             return null;
         }
 
+        // 候选端口顺序：上次成功的排最前，其余保持原顺序。
+        private static int[] OrderedLocalProxyPorts()
+        {
+            int[] array = AutoDetectPorts;
+            if (lastGoodLocalProxyPort <= 0)
+            {
+                return array;
+            }
+            List<int> list = new List<int>(array.Length);
+            list.Add(lastGoodLocalProxyPort);
+            for (int i = 0; i < array.Length; i++)
+            {
+                if (array[i] != lastGoodLocalProxyPort)
+                {
+                    list.Add(array[i]);
+                }
+            }
+            return list.ToArray();
+        }
+
         private static string ProbeLocalProxyNow()
         {
+            // 刚扫过就直接复用结果。没有可用代理时每个调用方都会各自扫一遍，
+            // 而探头对死端口要吃满 500ms 超时——这正是「获取代理很慢」的来源。
+            if ((DateTime.UtcNow - lastLocalProxyScanAt).TotalMilliseconds < (double)LocalProxyScanMinIntervalMs)
+            {
+                return detectedProxyUrl;
+            }
             if (Interlocked.CompareExchange(ref detectBusy, 1, 0) == 0)
             {
                 string result = null;
@@ -3795,6 +4015,7 @@ namespace FreebuffController
                 {
                 }
                 detectedProxyUrl = result;
+                lastLocalProxyScanAt = DateTime.UtcNow;
                 Interlocked.Exchange(ref detectBusy, 0);
                 return result;
             }
@@ -3899,6 +4120,29 @@ namespace FreebuffController
             return ProxyFunctional(url);
         }
 
+        // 一次探针不过不算掉线：节点只是慢一下（gstatic 那次吃满 2.5s 超时）也会被判死，
+        // 于是托盘弹出「实例的代理已不可用」。这里先等 400ms 让它翻案——
+        // 第二次 TCP 还不通才算「端口不通」（代理客户端多半退了），
+        // 第二次功能探测也不过才算「不转发流量」（连着但节点卡住）。
+        // 返回 null 表示没问题，否则返回给用户看的短原因。
+        private static string ProxyBrokenReason(string url)
+        {
+            if (ProxyUsable(url))
+            {
+                return null;
+            }
+            Thread.Sleep(400);
+            if (!ProxyAlive(url))
+            {
+                return "端口不通";
+            }
+            if (IsSocksUrl(url) || ProxyFunctional(url))
+            {
+                return null;
+            }
+            return "不转发流量";
+        }
+
         private void WatchProxyHealth()
         {
             if (Interlocked.CompareExchange(ref proxyWatchBusy, 1, 0) != 0)
@@ -3909,7 +4153,7 @@ namespace FreebuffController
             ThreadPool.QueueUserWorkItem(delegate
             {
                 List<KeyValuePair<int, string>> targets = new List<KeyValuePair<int, string>>();
-                List<int> broken = new List<int>();
+                Dictionary<int, string> broken = new Dictionary<int, string>();
                 bool manualBroken = false;
                 try
                 {
@@ -3937,14 +4181,15 @@ namespace FreebuffController
                     }
                     foreach (KeyValuePair<int, string> item3 in targets)
                     {
-                        if (!ProxyUsable(item3.Value))
+                        string text5 = ProxyBrokenReason(item3.Value);
+                        if (text5 != null)
                         {
-                            broken.Add(item3.Key);
+                            broken[item3.Key] = text5;
                         }
                     }
                     if (manual != null)
                     {
-                        manualBroken = !ProxyUsable(manual);
+                        manualBroken = (ProxyBrokenReason(manual) != null);
                     }
                 }
                 catch
@@ -3957,20 +4202,21 @@ namespace FreebuffController
                     {
                         foreach (KeyValuePair<int, string> item4 in targets)
                         {
-                            bool flag = broken.Contains(item4.Key);
+                            string reason;
+                            bool flag = broken.TryGetValue(item4.Key, out reason);
                             bool flag2;
                             lock (launchProxyLock)
                             {
                                 flag2 = launchProxyNotified.Contains(item4.Key);
                             }
+                            string text = ((item4.Key == 0) ? "主实例" : ("实例 " + item4.Key));
                             if (flag && !flag2)
                             {
                                 lock (launchProxyLock)
                                 {
                                     launchProxyNotified.Add(item4.Key);
                                 }
-                                string text = ((item4.Key == 0) ? "主实例" : ("实例 " + item4.Key));
-                                string text2 = text + "的代理已不可用（" + item4.Value + "）——该实例的网络很可能已经断了，重启它才会重新接入代理。";
+                                string text2 = ((reason == "端口不通") ? (text + "的代理端口不通（" + item4.Value + "）——代理客户端多半退出了或者正在重启；它回来以后实例会自己接回去，先不用动它。") : (text + "的代理连着但不转发流量（" + item4.Value + "）——多半是节点卡住了，换个节点就会恢复；实在不行再重启这个实例。"));
                                 SetStatus(text2, ColNewVersion);
                                 TrayNotify(text2);
                             }
@@ -3980,6 +4226,9 @@ namespace FreebuffController
                                 {
                                     launchProxyNotified.Remove(item4.Key);
                                 }
+                                string text4 = text + "的代理已恢复 ✓（" + item4.Value + "）";
+                                SetStatus(text4, ColGreen);
+                                TrayNotify(text4);
                             }
                         }
                         if (manual != null)
@@ -4108,6 +4357,7 @@ namespace FreebuffController
                     {
                         ApplyProxyStatus(!noProxy, routeKind, routeAddr);
                         ApplyQuotaColumn();
+                        CheckQuotaExhaustionAlert();
                         if (noProxy)
                         {
                             if (force && announce)
@@ -4148,6 +4398,53 @@ namespace FreebuffController
                 {
                     dataGridViewCell.ToolTipText = text2;
                 }
+            }
+        }
+
+        private void CheckQuotaExhaustionAlert()
+        {
+            try
+            {
+                bool mainRunning;
+                HashSet<int> runningSlots = QueryRunning(out mainRunning);
+                for (int i = 0; i <= 9; i++)
+                {
+                    bool isRunning = (i == 0) ? mainRunning : runningSlots.Contains(i);
+                    if (quotaInfos[i] != null && quotaInfos[i].Exhausted)
+                    {
+                        if (isRunning && !notifiedExhaustedSlots.Contains(i))
+                        {
+                            notifiedExhaustedSlots.Add(i);
+                            int nextSlot = -1;
+                            for (int j = 1; j <= 9; j++)
+                            {
+                                int candidate = (i + j) % 10;
+                                if (quotaInfos[candidate] != null && !quotaInfos[candidate].Exhausted && !quotaInfos[candidate].Offline && quotaInfos[candidate].Text != "—" && quotaInfos[candidate].Text != "获取失败")
+                                {
+                                    nextSlot = candidate;
+                                    break;
+                                }
+                            }
+                            string currentName = (i == 0) ? "主实例" : ("实例 " + i);
+                            if (nextSlot != -1)
+                            {
+                                string nextName = (nextSlot == 0) ? "主实例" : ("实例 " + nextSlot);
+                                TrayNotify(currentName + " 今日额度已耗尽！\n" + nextName + "（" + quotaInfos[nextSlot].Text + "）额度充足，可按 Alt+" + (nextSlot == 0 ? "0" : nextSlot.ToString()) + " 快速切号接力。");
+                            }
+                            else
+                            {
+                                TrayNotify(currentName + " 今日额度已耗尽。");
+                            }
+                        }
+                    }
+                    else if (quotaInfos[i] != null && !quotaInfos[i].Exhausted)
+                    {
+                        notifiedExhaustedSlots.Remove(i);
+                    }
+                }
+            }
+            catch
+            {
             }
         }
 
@@ -7510,6 +7807,42 @@ namespace FreebuffController
             }
         }
 
+        // 自测用：起一个假代理。answers=true 时对每个连接先回一个 204（功能探测能过 HTTP 那一半），
+        // false 时只接受连接、立刻关掉——就是「TCP 通但不转发」那种僵死代理。
+        private static TcpListener StartFakeProxy(bool answers, out Thread pump)
+        {
+            TcpListener tcpListener = new TcpListener(IPAddress.Loopback, 0);
+            tcpListener.Start();
+            TcpListener captured = tcpListener;
+            bool flag = answers;
+            ThreadStart body = delegate
+            {
+                while (true)
+                {
+                    try
+                    {
+                        TcpClient tcpClient = captured.AcceptTcpClient();
+                        if (flag)
+                        {
+                            byte[] bytes = Encoding.ASCII.GetBytes("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                            NetworkStream stream = tcpClient.GetStream();
+                            stream.Write(bytes, 0, bytes.Length);
+                            stream.Flush();
+                        }
+                        tcpClient.Close();
+                    }
+                    catch
+                    {
+                        return;
+                    }
+                }
+            };
+            pump = new Thread(body);
+            pump.IsBackground = true;
+            pump.Start();
+            return tcpListener;
+        }
+
         internal static int RunSelfTest(string reportPath)
         {
             if (string.IsNullOrEmpty(reportPath))
@@ -7658,6 +7991,16 @@ namespace FreebuffController
                 string text14 = "http://127.0.0.1:1";
                 action("ControllerProxyAvailable：判定能跑通且不抛异常", arg, arg2);
                 action("代理判定：死端口不算「连着代理」（TCP 不通 / 功能探测不过）", !ProxyAlive(text14) && !ProxyProbeOk(text14, "http://connect.rom.miui.com/generate_204"), text14);
+                action("ProxyBrokenReason：死端口 → 判「端口不通」（不再只看一次探针）", ProxyBrokenReason(text14) == "端口不通", text14);
+                Thread pump;
+                TcpListener fakeDead = StartFakeProxy(false, out pump);
+                string text15 = "http://127.0.0.1:" + ((IPEndPoint)fakeDead.LocalEndpoint).Port;
+                action("ProxyBrokenReason：TCP 通但不转发 → 判「不转发流量」（僵死代理不能放过）", ProxyBrokenReason(text15) == "不转发流量", text15);
+                fakeDead.Stop();
+                TcpListener fakeSocks = StartFakeProxy(true, out pump);
+                string text16 = "socks5://127.0.0.1:" + ((IPEndPoint)fakeSocks.LocalEndpoint).Port;
+                action("ProxyBrokenReason：判定可用的代理不报掉线（不误报）", ProxyUsable(text16) && ProxyBrokenReason(text16) == null, text16);
+                fakeSocks.Stop();
                 QuotaInfo quotaInfo = OfflineQuota(null);
                 QuotaInfo quotaInfo2 = new QuotaInfo();
                 quotaInfo2.Text = "日12/40";

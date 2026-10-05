@@ -7,6 +7,14 @@ python "%~dp0tools\embed-handover.py" || (
   echo EMBED FAILED ^(需要 python3^)
   exit /b 1
 )
+rem 检查目标 exe 是否正在运行（避免报晦涩的 CS0016 文件占用错误）
+tasklist /fi "imagename eq FreebuffController.exe" 2>nul | "%SystemRoot%\System32\find.exe" /i "FreebuffController.exe" >nul
+if %errorlevel%==0 (
+  echo [提示] 检测到 FreebuffController.exe 正在后台运行！
+  echo 请在系统托盘右键退出控制器后再编译，以避免文件被锁定。
+  exit /b 1
+)
+
 "%CSC%" -nologo -target:winexe -platform:anycpu -optimize+ -codepage:65001 ^
   -r:System.dll -r:System.Core.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll -r:System.Management.dll ^
   -r:System.IO.Compression.dll -r:System.IO.Compression.FileSystem.dll ^
