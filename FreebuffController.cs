@@ -28,8 +28,8 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
-[assembly: System.Reflection.AssemblyVersion("1.9.10.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.10.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.11.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.11.0")]
 
 namespace FreebuffController
 {
@@ -2524,6 +2524,9 @@ namespace FreebuffController
             {
                 throw new ApplicationException("未找到 Freebuff 桌面版：\n" + FreebuffExe + "\n\n请先安装 Freebuff。");
             }
+            // v1.9.11 修复：启动时必须装载 proxy.txt。此前 ReloadProxyConfig 只在
+            // 「保存设置」时被调用，重启后 off 丢失、按默认 auto 又去探端口注入代理。
+            ReloadProxyConfig();
             installedVersion = ReadInstalledVersion();
             hanhuaRecheckVersion = installedVersion;
             BuildUi();
@@ -3645,13 +3648,31 @@ namespace FreebuffController
 
         private static void ReloadProxyConfig()
         {
-            string text = "auto";
-            string text2 = null;
+            string text = null;
             try
             {
                 if (File.Exists(LocalProxyConfigFile))
                 {
-                    string text3 = File.ReadAllText(LocalProxyConfigFile).Trim();
+                    text = File.ReadAllText(LocalProxyConfigFile);
+                }
+            }
+            catch
+            {
+            }
+            ApplyProxyConfigText(text);
+        }
+
+        // 解析 proxy.txt 原文并落地：null / 空白 = auto，off = 停用，绝对 URL = manual。
+        // 抽成纯函数是为了让自测能直接打靶（见 RunSelfTest「代理配置装载」组）。
+        private static void ApplyProxyConfigText(string content)
+        {
+            string text = "auto";
+            string text2 = null;
+            try
+            {
+                if (content != null)
+                {
+                    string text3 = content.Trim();
                     if (text3.Length > 0)
                     {
                         Uri result;
@@ -8009,6 +8030,15 @@ namespace FreebuffController
                 action("OfflineQuota：没连代理时显示「未连代理」而不是旧数字", quotaInfo.Text == "未连代理" && quotaInfo.Offline && quotaInfo.Text != "日12/40", quotaInfo.Text);
                 action("OfflineQuota：上次读到过的值降级到悬停提示", quotaInfo3.Tip != null && quotaInfo3.Tip.Contains("日12/40"), quotaInfo3.Tip);
                 action("OfflineQuota：连续跳过不会把「未连代理」当成上次的值", quotaInfo4.Tip != null && !quotaInfo4.Tip.Contains("未连代理"), quotaInfo4.Tip);
+                ApplyProxyConfigText(null);
+                action("ProxyConfigText：无配置 = auto", localProxyMode == "auto" && manualProxyUrl == null, localProxyMode);
+                ApplyProxyConfigText("off\r\n");
+                action("ProxyConfigText：off（末尾带换行） = 停用", localProxyMode == "off" && manualProxyUrl == null, localProxyMode);
+                action("ProxyConfigText：off 时启动不注入代理（LaunchProxyUrl 为 null）", LaunchProxyUrl() == null, "");
+                ApplyProxyConfigText("http://127.0.0.1:10808");
+                action("ProxyConfigText：URL = manual 且按原文保留", localProxyMode == "manual" && manualProxyUrl == "http://127.0.0.1:10808", localProxyMode + " " + (manualProxyUrl ?? ""));
+                ApplyProxyConfigText("   ");
+                action("ProxyConfigText：全空白 = auto（不会当成坏配置）", localProxyMode == "auto" && manualProxyUrl == null, localProxyMode);
             }
             catch (Exception ex2)
             {
