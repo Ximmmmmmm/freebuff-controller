@@ -28,8 +28,8 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
-[assembly: System.Reflection.AssemblyVersion("1.9.11.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.11.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.12.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.12.0")]
 
 namespace FreebuffController
 {
@@ -424,7 +424,7 @@ namespace FreebuffController
 
         private static void ShowAlreadyRunningDialog()
         {
-            MessageBox.Show("Freebuff 多开控制器已经在运行了。\n\n" + DescribeRunningController() + "\n\n窗口可能被最小化、或藏在别的窗口后面——双击任务栏 / 托盘里的控制器图标就能把它叫回来。\n如果到处都找不到这个窗口，可以在任务管理器里结束上面这个进程，再重新双击打开。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Asterisk);
+            MessageBox.Show("Freebuff 多开控制器已经在运行了。\n\n" + DescribeRunningController() + "\n\n窗口可能被最小化、或藏在别的窗口后面——点任务栏里的控制器按钮就能把它叫回来。\n如果到处都找不到这个窗口，可以在任务管理器里结束上面这个进程，再重新双击打开。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Asterisk);
         }
 
         private static string DescribeRunningController()
@@ -658,8 +658,6 @@ namespace FreebuffController
             public string Tip;
 
             public bool Exhausted;
-
-            public bool Offline;
         }
 
         private class InitModeDialog : Form
@@ -1987,7 +1985,7 @@ namespace FreebuffController
                 Label value = new Label
                 {
                     AutoSize = false,
-                    Text = "网络路径：本地代理 → 系统代理 → 直连。从本工具启动的 Freebuff 实例在代理运行时也会走它。",
+                    Text = "额度获取跟着这里的设置走：设了代理走代理，没设（off / 未探测到）走直连。其它网络走 本地代理 → 系统代理 → 直连。",
                     Bounds = new Rectangle(16, 10, 428, 36),
                     ForeColor = ColSub
                 };
@@ -2082,7 +2080,7 @@ namespace FreebuffController
             {
                 if (localProxyMode == "off")
                 {
-                    stateLabel.Text = "✗ 已停用（off）：网络走 系统代理 → 直连，启动的实例不注入代理。";
+                    stateLabel.Text = "✗ 已停用（off）：额度获取走直连，启动的实例不注入代理。";
                     stateLabel.ForeColor = ColSub;
                     RefreshPortProbe(false);
                     return;
@@ -2090,14 +2088,14 @@ namespace FreebuffController
                 string text = ((localProxyMode == "manual") ? manualProxyUrl : detectedProxyUrl);
                 if (text == null)
                 {
-                    stateLabel.Text = "… 自动探测中：常见端口（7890 / 7897 / 10808 / 10809 / 1080）尚无可用 HTTP 代理。";
+                    stateLabel.Text = "… 自动探测中：常见端口（7890 / 7897 / 10808 / 10809 / 1080）尚无可用 HTTP 代理，额度获取暂时走直连。";
                     stateLabel.ForeColor = ColSub;
                     RefreshPortProbe(true);
                     return;
                 }
                 bool flag = ProxyAlive(text);
-                string text2 = (IsSocksUrl(text) ? "（SOCKS：仅启动的实例使用，控制器自身请求跳过）" : "");
-                stateLabel.Text = (flag ? ("✓ 本地代理运行中（" + text + "）" + text2 + "：控制器网络与启动的实例都会使用它。") : ("✗ 未在运行（" + text + "）：请求自动落到 系统代理 → 直连，启动实例不带代理参数。"));
+                string text2 = (IsSocksUrl(text) ? "（SOCKS：控制器请求不支持，额度走直连；启动的实例仍会用它）" : "");
+                stateLabel.Text = (flag ? ("✓ 本地代理运行中（" + text + "）" + text2 + "：额度获取与启动的实例都会使用它。") : ("✗ 未在运行（" + text + "）：额度获取仍走它（会失败），启动实例不带代理参数。"));
                 stateLabel.ForeColor = (flag ? ColGreen : ColSub);
                 RefreshPortProbe(true);
             }
@@ -2199,8 +2197,6 @@ namespace FreebuffController
 
         private const int MaxSlot = 9;
 
-        private const string trayDefaultTip = "Freebuff 多开控制器";
-
         private const string QuotaApiUrl = "https://www.codebuff.com/api/v1/freebuff/session";
 
         private const string FallbackUpdateFeed = "https://freebuff.com/api/desktop/updates/win-x64/latest.yml";
@@ -2301,8 +2297,6 @@ namespace FreebuffController
 
         private DataGridView grid;
 
-        private NotifyIcon tray;
-
         private Label statusLabel;
 
         private System.Windows.Forms.Timer statusRevertTimer;
@@ -2355,6 +2349,10 @@ namespace FreebuffController
         private Label deleteLink;
 
         private ToolTip deleteTip;
+
+        private Label adblockLink;
+
+        private ToolTip adblockTip;
 
 
         private string installedVersion;
@@ -2527,6 +2525,15 @@ namespace FreebuffController
             // v1.9.11 修复：启动时必须装载 proxy.txt。此前 ReloadProxyConfig 只在
             // 「保存设置」时被调用，重启后 off 丢失、按默认 auto 又去探端口注入代理。
             ReloadProxyConfig();
+            // 广告拦截开关同理要在启动时装载，否则重启后设置丢失。装载后无条件跑一次注入：
+            // 官方自动更新和汉化恢复都会把整个 ui/ 换掉，注入的样式随之消失，不能只等下次
+            // ReplaceUiDir 才补。
+            // 这里不能写成 if (adblockEnabled) 才跑——关着的时候同样要能把「之前注入过、
+            // 后来配置被改成 off（或换过控制器）」的残留样式摘干净，否则残留会永久留在装机里
+            // 且没有任何 UI 能清掉它（端到端实测踩过这个）。状态与文件一致时内部 next == html
+            // 直接返回不写盘，所以关着且没注入过时这一步只是读一次 6.5KB 文件，不拖慢启动。
+            ReloadAdblockConfig();
+            ApplyAdblockToInstalled();
             installedVersion = ReadInstalledVersion();
             hanhuaRecheckVersion = installedVersion;
             BuildUi();
@@ -2646,8 +2653,6 @@ namespace FreebuffController
             {
                 proxyTimer.Dispose();
             }
-            tray.Visible = false;
-            tray.Dispose();
             base.OnFormClosed(e);
         }
 
@@ -2678,7 +2683,7 @@ namespace FreebuffController
             hintLabel.ForeColor = ColSub;
             base.Controls.Add(hintLabel);
             // 代理状态不占窗口：实时状态与逐端口探测都在「代理设置」对话框里，
-            // 掉线/恢复照旧弹气泡。proxyLink 只当后台状态文案的落点（不进界面）。
+            // 掉线/恢复的提醒走窗口状态栏。proxyLink 只当后台状态文案的落点（不进界面）。
             proxyLink = new Label();
             proxyTip = new ToolTip();
             deleteLink = MakeLink("删除会话", 406, 72, delegate
@@ -2691,6 +2696,33 @@ namespace FreebuffController
             {
                 OpenProxySettings();
             });
+            // 「隐藏广告」开关（全控制器唯一入口）：开 = 绿 ✓，关 = 灰；
+            // 状态、落地、回执都走 ToggleAdblock 一处逻辑。
+            adblockLink = new Label();
+            adblockLink.AutoSize = false;
+            adblockLink.Bounds = new Rectangle(300, 14, 96, 20);
+            adblockLink.TextAlign = ContentAlignment.MiddleRight;
+            adblockLink.Cursor = Cursors.Hand;
+            adblockLink.Click += delegate
+            {
+                ToggleAdblock();
+            };
+            adblockLink.MouseEnter += delegate
+            {
+                adblockLink.ForeColor = ColAccentHover;
+            };
+            adblockLink.MouseDown += delegate
+            {
+                adblockLink.ForeColor = ColAccentHover;
+            };
+            adblockLink.MouseLeave += delegate
+            {
+                RefreshAdblockLink();
+            };
+            base.Controls.Add(adblockLink);
+            adblockTip = new ToolTip();
+            adblockTip.SetToolTip(adblockLink, AdblockTipText);
+            RefreshAdblockLink();
             selfLink = new Label();
             selfLink.AutoSize = false;
             selfLink.Text = "控制器有新版本 · 自更新";
@@ -2746,7 +2778,6 @@ namespace FreebuffController
             hanhuaLabel.Bounds = new Rectangle(20, 542, 200, 18);
             hanhuaLabel.ForeColor = ColSub;
             hanhuaLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
-            BuildTray();
             statusLabel = new Label();
             statusLabel.AutoSize = false;
             statusLabel.Text = ReadyStatus();
@@ -2765,14 +2796,6 @@ namespace FreebuffController
             base.Controls.Add(statusLabel);
             float num = DpiScale();
             ScaleUi(this, num);
-            try
-            {
-                Font font = tray.ContextMenuStrip.Font;
-                tray.ContextMenuStrip.Font = new Font(font.FontFamily, font.Size * num, font.Style);
-            }
-            catch
-            {
-            }
             hanhuaDir = FindHanhuaDir();
             RefreshHanhuaUi();
             refreshTimer = new System.Windows.Forms.Timer();
@@ -2817,6 +2840,7 @@ namespace FreebuffController
             DetectProxyAsync();
             CheckVersionAsync();
             StartAutoRestoreHanhua("控制器启动", null);
+            EnsureLocalPatches("控制器启动");
             CheckPackUpdateAsync();
             CheckSelfUpdateAsync();
         }
@@ -2824,41 +2848,6 @@ namespace FreebuffController
         private static string ReadyStatus()
         {
             return "";
-        }
-
-        private void SetTrayTip(string text)
-        {
-            if (tray == null)
-            {
-                return;
-            }
-            string text2 = (string.IsNullOrEmpty(text) ? "Freebuff 多开控制器" : ("Freebuff 多开控制器 · " + text));
-            if (text2.Length > 63)
-            {
-                text2 = text2.Substring(0, 60) + "…";
-            }
-            try
-            {
-                tray.Text = text2;
-            }
-            catch
-            {
-            }
-        }
-
-        private void TrayNotify(string text)
-        {
-            if (tray == null || string.IsNullOrEmpty(text))
-            {
-                return;
-            }
-            try
-            {
-                tray.ShowBalloonTip(6000, "Freebuff 多开控制器", text, ToolTipIcon.Info);
-            }
-            catch
-            {
-            }
         }
 
         private void SetHanhuaText(string text)
@@ -3012,7 +3001,6 @@ namespace FreebuffController
 
         private void SetStatus(string text, Color? tint = null)
         {
-            SetTrayTip(text);
             if (statusLabel == null)
             {
                 return;
@@ -3048,7 +3036,6 @@ namespace FreebuffController
                 {
                     statusRevertTimer.Stop();
                     StopStatusBreathing();
-                    SetTrayTip(ReadyStatus());
                     if (!base.IsDisposed && statusLabel != null)
                     {
                         FadeStatusColor(ColBg, 260, delegate
@@ -3313,22 +3300,32 @@ namespace FreebuffController
             return l;
         }
 
-        private void BuildTray()
+        // 开关（全控制器唯一入口：主窗口顶部链接）：翻转状态 → 写配置 → 立刻落地到装机 → 界面同步 → 状态栏报结果。
+        // 先写配置再落地是有意的：落地失败也不至于让开关状态与配置文件不一致。
+        private void ToggleAdblock()
         {
-            tray = new NotifyIcon();
-            tray.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-            tray.Text = "Freebuff 多开控制器";
-            tray.Visible = true;
-            ContextMenuStrip contextMenuStrip = new ContextMenuStrip();
-            contextMenuStrip.Items.Add("退出", null, delegate
+            adblockEnabled = !adblockEnabled;
+            WriteAdblockConfig(adblockEnabled ? "on" : "off");
+            RefreshAdblockLink();
+            string note = ApplyAdblockToInstalled();
+            SetStatus(note ?? (adblockEnabled ? "广告拦截已开启" : "广告拦截已关闭"), ColGreen);
+        }
+
+        // 界面开关的呈现：开 = 绿 + ✓，关 = 灰。悬停色由 MouseEnter 临时覆盖，离开时回到这里重算。
+        private void RefreshAdblockLink()
+        {
+            if (adblockLink == null)
             {
-                Close();
-            });
-            tray.ContextMenuStrip = contextMenuStrip;
-            tray.DoubleClick += delegate
-            {
-                ShowUp();
-            };
+                return;
+            }
+            adblockLink.Text = AdblockLinkText(adblockEnabled);
+            adblockLink.ForeColor = (adblockEnabled ? ColGreen : ColSub);
+        }
+
+        // 开关文字抽成纯函数，便于自测打靶（开 ✓、关不戴标记）。
+        private static string AdblockLinkText(bool on)
+        {
+            return on ? "隐藏广告 ✓" : "隐藏广告";
         }
 
         private void ShowUp()
@@ -3372,7 +3369,7 @@ namespace FreebuffController
             {
                 showFailNotifiedAt = DateTime.Now;
                 LogFail("ShowUp：窗口已还原但未取得前台（前台锁）  现在的前台是 " + Program.DescribeForegroundWindow());
-                TrayNotify("控制器窗口已还原，但没能跳到最前——它就在任务栏上（按 Alt+Tab 或点图标即可）。");
+                SetStatus("控制器窗口已还原，但没能跳到最前——它就在任务栏上（按 Alt+Tab 或点任务栏图标即可）。", ColNewVersion);
             }
         }
 
@@ -3703,6 +3700,255 @@ namespace FreebuffController
             File.WriteAllText(LocalProxyConfigFile, content);
         }
 
+        // ==================== 广告拦截（隐藏 Freebuff 界面里的广告位）====================
+        //
+        // 为什么做在控制器而不是汉化包：汉化包是「只翻 UI 文案」的产物，装它的人是为了中文。
+        // 把广告拦截塞进去等于替所有用户默认改掉客户端行为——广告卡里带着「{标题} 并赚取
+        // N Freebucks」的入口、赞助提案带着 computeGrant（免费算力），他们既不知情也关不掉。
+        // 控制器本来就管运行时和装机文件，做成默认关闭的开关，选择权和后果都留在用户手上。
+        //
+        // 手段是往装机 ui/index.html 的 </head> 前注入一段 <style>，只做视觉隐藏：广告仍会从
+        // 本地 /api/ad/slot、/api/ad/intermission 拉取，impression 仍会上报。换来一个好处——
+        // 服务端看到的仍是「有曝光、有上报」的正常客户端，而不是一个从不请求广告的客户端。
+        //
+        // 两个必须成对处理的坑（0.0.162 现场读出来的）：
+        //   1) .sponsor-intermission 是 position:absolute + inset:0 + 不透明背景，它自己就是
+        //      盖住整个工作区的层，没有单独的遮罩元素；
+        //   2) 聚光灯反过来——另有 .spotlight-backdrop 遮罩，只藏 .spotlight-card 会剩下一层
+        //      看不见的膜挡住点击。两者必须一起藏。
+        //
+        // 有意不藏两类：
+        //   - .sponsored-thread-note：信息提示（「这是 X 的赞助任务，在自己的分支上运行」），
+        //     不是广告位，藏了会让人不知道自己正在看赞助线程；
+        //   - Ad lab 那一族（.placement-preview-lab / .placement-lab-* / .placement-creative-export
+        //     / .placement-preview-feedback / .placement-custom-creative / .placement-preview-tab）：
+        //     要自己点开才出现的本地 mock 预览工具，其中 creative-export 还是 z-index:9999 的
+        //     全屏层，误藏风险大。
+        //
+        // 已知副作用：广告卡里的 ad-reward（赚 Freebucks 的外链任务）是广告容器的子元素，父级一藏
+        // 它就跟着没了；赞助提案的 computeGrant 同理。这是「看不到广告」的必然代价，开关默认关就是
+        // 为了让用户自己决定要不要付这个代价。
+        //
+        // CSS 选择器失配是静默的：Freebuff 改版换个类名，拦截就悄悄失效且不报任何错。所以配了
+        // AdblockMissingClasses 做存在性自检，缺哪个就在状态栏说出来，不埋哑弹。
+
+        private static readonly string AdblockConfigFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FreebuffController\\adblock.txt");
+
+        // 主窗口顶部链接这一处入口用的说明。
+        private const string AdblockTipText = "往 Freebuff 界面注入一段样式，隐藏广告位（插播、聚光灯、侧边栏广告卡、赞助提案等）。\r\n\r\n只是不显示，广告仍在后台拉取；代价是「并赚取 Freebucks」的广告奖励入口和赞助提案的免费算力也一起看不到。\r\n改动写入装机 ui\\index.html，下次打开 Freebuff 生效。";
+
+        // 与汉化包共用同一个标记 id：万一两边都注入过，后跑的那方会把先跑的那块整块摘掉，
+        // 不会叠出两个 style 块。
+        private const string AdblockStyleId = "hanhua-adblock";
+
+        private static readonly Regex AdblockBlockRegex = new Regex("[ \t]*<style id=\"" + AdblockStyleId + "\">[\\s\\S]*?</style>[ \t]*\\r?\\n?");
+
+        private static bool adblockEnabled;
+
+        // 18 条广告顶层容器选择器，逐个对着 0.0.162 装机的 ui bundle 与 CSS 核对过。
+        // 这份清单是单一数据源：既用于生成 CSS，也用于改版后的存在性自检，避免两边各写一套走偏。
+        private static readonly string[] AdblockSelectors = new string[]
+        {
+            ".sponsor-intermission",
+            ".spotlight-backdrop",
+            ".spotlight-card",
+            ".ad-showcase",
+            ".sponsored-ad",
+            ".sponsored-proposal",
+            ".sponsored-setup-card",
+            ".sponsored-connect-account",
+            ".generic-setup-invitation",
+            ".supabase-setup-invitation",
+            ".served-billboard",
+            ".partner-placement",
+            ".partner-placement-composer",
+            ".placement-sidebar-card",
+            ".placement-ad-chip",
+            ".placement-panel-creative",
+            ".placement-panel-content",
+            ".msg.sponsored-task"
+        };
+
+        // 选择器 → 自检用类名：取最后一段，".msg.sponsored-task" → "sponsored-task"。
+        private static string AdblockClassNameOf(string selector)
+        {
+            if (selector == null)
+            {
+                return null;
+            }
+            int num = selector.LastIndexOf('.');
+            if (num >= 0 && num < selector.Length - 1)
+            {
+                return selector.Substring(num + 1);
+            }
+            return selector;
+        }
+
+        private static string BuildAdblockStyle()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("    <style id=\"").Append(AdblockStyleId).Append("\">\n");
+            sb.Append("      /* 由 Freebuff 多开控制器注入：隐藏 Freebuff 界面里的广告位。\n");
+            sb.Append("         在控制器主窗口顶部的「隐藏广告」里可以关掉，关掉后这段样式会被整块摘除。 */\n");
+            for (int i = 0; i < AdblockSelectors.Length; i++)
+            {
+                sb.Append("      ").Append(AdblockSelectors[i]);
+                sb.Append((i == AdblockSelectors.Length - 1) ? " {\n" : ",\n");
+            }
+            sb.Append("        display: none !important;\n");
+            sb.Append("      }\n");
+            sb.Append("    </style>\n");
+            return sb.ToString();
+        }
+
+        // 纯函数：先摘掉已有注入块，需要时在 </head> 前重新插一块。
+        // 幂等——同一份输入反复跑得到同一份输出；enable=false 等价于「摘除」。
+        // 找不到 </head> 时原样返回，绝不做半截注入。
+        // 抽成纯函数是为了让自测能直接打靶（见 RunSelfTest「广告拦截注入」组）。
+        private static string ApplyAdblockToHtml(string html, bool enable)
+        {
+            if (html == null)
+            {
+                return null;
+            }
+            string text = AdblockBlockRegex.Replace(html, "");
+            if (!enable)
+            {
+                return text;
+            }
+            int num = text.IndexOf("</head>", StringComparison.OrdinalIgnoreCase);
+            if (num < 0)
+            {
+                return html;
+            }
+            // 插在 </head> 所在行的「行首」，不是紧挨着 </head>。区别很要命：紧挨着插会让
+            // 原有缩进和样式块自带的缩进叠在一起，而摘除正则的前导 [ \t]* 会把两层一起吃掉，
+            // 于是每注入一次就啃掉一层缩进——既不幂等，摘除后也回不到原始（自检抓到过这个）。
+            // 插在行首则原缩进仍留在 </head> 前面，摘除只吃样式块自己带的那 4 个空格，两边对称。
+            int lineStart = text.LastIndexOf('\n', num);
+            lineStart = ((lineStart < 0) ? 0 : (lineStart + 1));
+            return text.Substring(0, lineStart) + BuildAdblockStyle() + text.Substring(lineStart);
+        }
+
+        // 类名存在性自检：在 ui/assets/*.css 里核对每条选择器对应的类名还在不在。
+        // 返回缺失清单（空 = 全部命中）。目录或 CSS 不在时返回空——无法判断就不报假警，
+        // 与 UiDirIntact 同一个取舍。
+        private static List<string> AdblockMissingClasses(string uiDir)
+        {
+            List<string> list = new List<string>();
+            try
+            {
+                string assets = Path.Combine(uiDir, "assets");
+                if (!Directory.Exists(assets))
+                {
+                    return list;
+                }
+                string[] files = Directory.GetFiles(assets, "*.css");
+                if (files.Length == 0)
+                {
+                    return list;
+                }
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < files.Length; i++)
+                {
+                    sb.Append(File.ReadAllText(files[i]));
+                }
+                string css = sb.ToString();
+                for (int j = 0; j < AdblockSelectors.Length; j++)
+                {
+                    string name = AdblockClassNameOf(AdblockSelectors[j]);
+                    if (name == null)
+                    {
+                        continue;
+                    }
+                    // 必须带选择器边界，不能光找子串：.partner-placement 是
+                    // .partner-placement-composer 的前缀，裸 Contains 会在前者已经消失、
+                    // 只剩后者的版本里误判成「还在」，自检本身就失效了。
+                    if (!Regex.IsMatch(css, "\\." + Regex.Escape(name) + "(?![A-Za-z0-9_-])"))
+                    {
+                        list.Add(name);
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return list;
+        }
+
+        private static void ReloadAdblockConfig()
+        {
+            string text = null;
+            try
+            {
+                if (File.Exists(AdblockConfigFile))
+                {
+                    text = File.ReadAllText(AdblockConfigFile);
+                }
+            }
+            catch
+            {
+            }
+            ApplyAdblockConfigText(text);
+        }
+
+        // 解析 adblock.txt 原文：只有 "on" 算开，null / 空白 / 其他一律关。
+        // 默认关是有意的——新增的行为改动不该在用户不知情时偷偷生效。
+        // 抽成纯函数是为了让自测能直接打靶。
+        private static void ApplyAdblockConfigText(string content)
+        {
+            adblockEnabled = (content != null && content.Trim().Equals("on", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static void WriteAdblockConfig(string content)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(AdblockConfigFile));
+            WriteFileAtomic(AdblockConfigFile, content);
+        }
+
+        // 落地到指定 index.html（uiDir 只用于类名自检）。返回可直接进状态栏的说明，
+        // 无事可做时返回 null。路径参数化是为了让自测拿临时目录打靶，不打真装机。
+        private static string ApplyAdblockToFile(string indexPath, string uiDir, bool enable)
+        {
+            try
+            {
+                if (!File.Exists(indexPath))
+                {
+                    return null;
+                }
+                string html = File.ReadAllText(indexPath);
+                string next = ApplyAdblockToHtml(html, enable);
+                if (next == html)
+                {
+                    return null;
+                }
+                if (!WriteFileAtomic(indexPath, next))
+                {
+                    return "广告拦截：写入 index.html 失败（文件被占用？）";
+                }
+                if (!enable)
+                {
+                    return "广告拦截已关闭，注入的样式已整块摘除 ✓ 下次打开 Freebuff 生效";
+                }
+                List<string> missing = AdblockMissingClasses(uiDir);
+                if (missing.Count > 0)
+                {
+                    return "广告拦截已注入 ✓ 但有 " + missing.Count + " 个类名本版未命中（" + string.Join("、", missing.ToArray()) + "）→ 这些位置可能仍显示广告";
+                }
+                return "广告拦截已注入 ✓ " + AdblockSelectors.Length + " 条选择器全部命中，下次打开 Freebuff 生效";
+            }
+            catch (Exception ex)
+            {
+                LogFail("广告拦截注入失败", ex);
+                return "广告拦截：注入出错（" + ex.Message + "）";
+            }
+        }
+
+        private static string ApplyAdblockToInstalled()
+        {
+            return ApplyAdblockToFile(InstalledUiIndex, InstalledUiDir, adblockEnabled);
+        }
+
         private static bool IsSocksUrl(string url)
         {
             if (url != null)
@@ -3710,6 +3956,32 @@ namespace FreebuffController
                 return url.StartsWith("socks", StringComparison.OrdinalIgnoreCase);
             }
             return false;
+        }
+
+        // 额度请求的路线：完全跟着代理设置走。
+        //   manual → 你填的地址；auto → 探测到的本地代理；off / 探测不到 / SOCKS → 直连（""）。
+        // 与其它请求的候选链（本地代理 → 系统代理 → 直连）不同：额度不落到系统代理——
+        // 「没设代理就直连」才是设置的字面意思，也让 off 真正等于不用代理。
+        // 抽成纯函数（三个入参）便于自测打靶（见 RunSelfTest「额度路线」组）。
+        private static string QuotaRouteFor(string mode, string manualUrl, string detectedUrl)
+        {
+            string text = ((mode == "manual") ? manualUrl : ((mode == "auto") ? detectedUrl : null));
+            if (!string.IsNullOrEmpty(text) && !IsSocksUrl(text))
+            {
+                return text;
+            }
+            return "";
+        }
+
+        // 运行期取值：auto 且还没探测到就顺手探一次（ProbeLocalProxyNow 自带 55 秒节流）。
+        private static string QuotaRoute()
+        {
+            string text = detectedProxyUrl;
+            if (localProxyMode == "auto" && string.IsNullOrEmpty(text))
+            {
+                text = ProbeLocalProxyNow();
+            }
+            return QuotaRouteFor(localProxyMode, manualProxyUrl, text);
         }
 
         private static string[] OrderedCandidates()
@@ -3870,7 +4142,7 @@ namespace FreebuffController
                 proxyLink.ForeColor = proxyColor;
                 if (proxyTip != null)
                 {
-                    proxyTip.SetToolTip(proxyLink, ok ? ("当前走" + kind + "（" + address + "），额度会正常刷新。\n左键：代理设置") : "没检测到可用代理：额度刷新已整轮跳过（不直连对外发请求），\n额度列显示「未连代理」。连上代理后自动恢复。\n左键：代理设置");
+                    proxyTip.SetToolTip(proxyLink, ok ? ("当前走" + kind + "（" + address + "）。额度获取跟随代理设置：设了代理走代理，没设走直连。\n左键：代理设置") : "没检测到可用代理。额度获取跟随代理设置：没设代理时走直连。\n左键：代理设置");
                 }
             }
         }
@@ -4142,7 +4414,7 @@ namespace FreebuffController
         }
 
         // 一次探针不过不算掉线：节点只是慢一下（gstatic 那次吃满 2.5s 超时）也会被判死，
-        // 于是托盘弹出「实例的代理已不可用」。这里先等 400ms 让它翻案——
+        // 于是会提示「实例的代理已不可用」。这里先等 400ms 让它翻案——
         // 第二次 TCP 还不通才算「端口不通」（代理客户端多半退了），
         // 第二次功能探测也不过才算「不转发流量」（连着但节点卡住）。
         // 返回 null 表示没问题，否则返回给用户看的短原因。
@@ -4239,7 +4511,6 @@ namespace FreebuffController
                                 }
                                 string text2 = ((reason == "端口不通") ? (text + "的代理端口不通（" + item4.Value + "）——代理客户端多半退出了或者正在重启；它回来以后实例会自己接回去，先不用动它。") : (text + "的代理连着但不转发流量（" + item4.Value + "）——多半是节点卡住了，换个节点就会恢复；实在不行再重启这个实例。"));
                                 SetStatus(text2, ColNewVersion);
-                                TrayNotify(text2);
                             }
                             else if (!flag && flag2)
                             {
@@ -4249,7 +4520,6 @@ namespace FreebuffController
                                 }
                                 string text4 = text + "的代理已恢复 ✓（" + item4.Value + "）";
                                 SetStatus(text4, ColGreen);
-                                TrayNotify(text4);
                             }
                         }
                         if (manual != null)
@@ -4259,7 +4529,6 @@ namespace FreebuffController
                                 manualProxyNotified = true;
                                 string text3 = "配置的代理 " + manual + " 已不可用——控制器的请求会自动回落系统代理 / 直连，代理客户端恢复后无需操作。";
                                 SetStatus(text3, ColNewVersion);
-                                TrayNotify(text3);
                             }
                             else if (!manualBroken && manualProxyNotified)
                             {
@@ -4279,15 +4548,12 @@ namespace FreebuffController
             }
             ThreadPool.QueueUserWorkItem(delegate
             {
-                bool noProxy = false;
-                string routeKind = null;
-                string routeAddr = null;
                 try
                 {
-                    noProxy = !ControllerProxyRoute(out routeKind, out routeAddr);
                     // 额度接口慢（服务端实测 12~21s/请求），串行拉 N 个账号就是 N 倍
                     // 等待；v1.9.6 起各账号并发拉，回一个填一个（渐进刷进表格），
-                    // 一轮总耗时约等于最慢的那一个账号。候选链 / 30s 超时 / 离线跳过语义不动。
+                    // 一轮总耗时约等于最慢的那一个账号。30s 超时不变；路线完全跟着代理设置走：
+                    // 设了代理走代理，没设（off / 探测不到）直连——不再有「没连代理就整轮跳过」。
                     List<int> list = new List<int>();
                     for (int i = 0; i <= 9; i++)
                     {
@@ -4304,10 +4570,6 @@ namespace FreebuffController
                                 Text = "—"
                             };
                         }
-                        else if (noProxy)
-                        {
-                            quotaInfos[i] = OfflineQuota(quotaInfos[i]);
-                        }
                         else
                         {
                             list.Add(i);
@@ -4315,7 +4577,7 @@ namespace FreebuffController
                     }
                     if (list.Count == 0)
                     {
-                        FinishQuotaRound(noProxy, routeKind, routeAddr, force, announce);
+                        FinishQuotaRound(force, announce);
                         return;
                     }
                     int[] pending = new int[1] { list.Count };
@@ -4345,7 +4607,7 @@ namespace FreebuffController
                             });
                             if (Interlocked.Decrement(ref pending[0]) == 0)
                             {
-                                FinishQuotaRound(noProxy, routeKind, routeAddr, force, announce);
+                                FinishQuotaRound(force, announce);
                             }
                         });
                     }
@@ -4359,12 +4621,9 @@ namespace FreebuffController
 
         // 一轮额度刷新的收尾（最后一个账号落定后恰好跑一次）：节流标记、
         // quotaBusy 解锁、状态行回执。
-        private void FinishQuotaRound(bool noProxy, string routeKind, string routeAddr, bool force, bool announce)
+        private void FinishQuotaRound(bool force, bool announce)
         {
-            if (!noProxy)
-            {
-                lastQuotaFetch = DateTime.Now;
-            }
+            lastQuotaFetch = DateTime.Now;
             Interlocked.Exchange(ref quotaBusy, 0);
             if (base.IsDisposed || !base.IsHandleCreated)
             {
@@ -4376,17 +4635,9 @@ namespace FreebuffController
                 {
                     if (!base.IsDisposed)
                     {
-                        ApplyProxyStatus(!noProxy, routeKind, routeAddr);
                         ApplyQuotaColumn();
                         CheckQuotaExhaustionAlert();
-                        if (noProxy)
-                        {
-                            if (force && announce)
-                            {
-                                SetStatus("未连接代理 · 已跳过额度刷新（连上代理后自动恢复）", ColNewVersion);
-                            }
-                        }
-                        else if (force && announce)
+                        if (force && announce)
                         {
                             SetStatus("额度已刷新 ✓" + RouteText());
                         }
@@ -4405,7 +4656,7 @@ namespace FreebuffController
                 QuotaInfo quotaInfo = quotaInfos[i];
                 string text = ((quotaInfo != null) ? quotaInfo.Text : null) ?? "…";
                 bool flag = quotaInfo != null && quotaInfo.Exhausted;
-                Color color = ((quotaInfo != null && quotaInfo.Offline) ? ColNewVersion : (flag ? Color.FromArgb(230, 90, 90) : ((quotaInfo != null && quotaInfo.Text != null) ? ColGreen : ColSub)));
+                Color color = (flag ? Color.FromArgb(230, 90, 90) : ((quotaInfo != null && quotaInfo.Text != null) ? ColGreen : ColSub));
                 DataGridViewRow dataGridViewRow = grid.Rows[i];
                 string text3 = dataGridViewRow.Cells[3].Value as string;
                 SetCell(dataGridViewRow, 3, text, color);
@@ -4440,7 +4691,7 @@ namespace FreebuffController
                             for (int j = 1; j <= 9; j++)
                             {
                                 int candidate = (i + j) % 10;
-                                if (quotaInfos[candidate] != null && !quotaInfos[candidate].Exhausted && !quotaInfos[candidate].Offline && quotaInfos[candidate].Text != "—" && quotaInfos[candidate].Text != "获取失败")
+                                if (quotaInfos[candidate] != null && !quotaInfos[candidate].Exhausted && quotaInfos[candidate].Text != "—" && quotaInfos[candidate].Text != "获取失败")
                                 {
                                     nextSlot = candidate;
                                     break;
@@ -4450,11 +4701,11 @@ namespace FreebuffController
                             if (nextSlot != -1)
                             {
                                 string nextName = (nextSlot == 0) ? "主实例" : ("实例 " + nextSlot);
-                                TrayNotify(currentName + " 今日额度已耗尽！\n" + nextName + "（" + quotaInfos[nextSlot].Text + "）额度充足，可按 Alt+" + (nextSlot == 0 ? "0" : nextSlot.ToString()) + " 快速切号接力。");
+                                SetStatus(currentName + " 今日额度已耗尽！\n" + nextName + "（" + quotaInfos[nextSlot].Text + "）额度充足，可按 Alt+" + (nextSlot == 0 ? "0" : nextSlot.ToString()) + " 快速切号接力。", ColNewVersion);
                             }
                             else
                             {
-                                TrayNotify(currentName + " 今日额度已耗尽。");
+                                SetStatus(currentName + " 今日额度已耗尽。", ColNewVersion);
                             }
                         }
                     }
@@ -4518,33 +4769,16 @@ namespace FreebuffController
 
         private static QuotaInfo FetchQuota(string token)
         {
-            string[] array = OrderedCandidates();
-            foreach (string proxyCandidate in array)
+            string text = QuotaRoute();
+            QuotaInfo quotaInfo = TryFetchQuota(token, text);
+            if (quotaInfo != null)
             {
-                QuotaInfo quotaInfo = TryFetchQuota(token, proxyCandidate);
-                if (quotaInfo != null)
-                {
-                    return quotaInfo;
-                }
+                return quotaInfo;
             }
             QuotaInfo quotaInfo2 = new QuotaInfo();
             quotaInfo2.Text = "获取失败";
+            quotaInfo2.Tip = "走 " + ((text.Length == 0) ? "直连" : text) + " 请求失败；" + ((localProxyMode == "manual") ? "代理设置里的地址可能不可用。" : "网络或代理可能不可用。");
             return quotaInfo2;
-        }
-
-        private static QuotaInfo OfflineQuota(QuotaInfo previous)
-        {
-            string text = ((previous != null && !previous.Offline) ? previous.Text : null);
-            string text2 = "未连接代理 · 已跳过额度刷新。\n连上代理后自动恢复。";
-            if (!string.IsNullOrEmpty(text) && text != "—")
-            {
-                text2 = text2 + "\n上次读到：" + text;
-            }
-            QuotaInfo quotaInfo = new QuotaInfo();
-            quotaInfo.Text = "未连代理";
-            quotaInfo.Offline = true;
-            quotaInfo.Tip = text2;
-            return quotaInfo;
         }
 
         private static double DictNum(Dictionary<string, object> d, string key)
@@ -4793,7 +5027,10 @@ namespace FreebuffController
                     RefreshHanhuaUi();
                     CleanupAfterUpdate();
                     CheckPackUpdateAsync();
-                    StartAutoRestoreHanhua("检测到 Freebuff 更新", null);
+                    StartAutoRestoreHanhua("检测到 Freebuff 更新", delegate
+                    {
+                        EnsureLocalPatches("更新后");
+                    });
                 }
             });
         }
@@ -4951,7 +5188,6 @@ namespace FreebuffController
                                 {
                                     string text2 = "有新版本 v" + latestVersion + " · 点此下载安装包（会先停掉实例再装，装完自动换回中文）";
                                     SetStatusAction(text2, ColNewVersion);
-                                    TrayNotify("Freebuff 有新版本 v" + latestVersion + "，点控制器窗口下方那行字即可下载。" + text);
                                 }
                             }
                             else if (manual && !string.IsNullOrEmpty(latest))
@@ -5134,7 +5370,6 @@ namespace FreebuffController
                             ApplyVersionUi(false);
                             SavePendingInstaller(downloadVersion, installerPath);
                             SetStatus(((instancesBefore > 0) ? ("已先停掉 " + instancesBefore + " 个实例 · ") : "") + "安装包已启动，按提示完成安装" + ((sweptCount > 0) ? ("（顺带收掉 " + sweptCount + " 个残留进程）") : ""), ColGreen);
-                            TrayNotify(((instancesBefore > 0) ? ("已停掉 " + instancesBefore + " 个实例，") : "") + "Freebuff v" + downloadVersion + " 安装程序已启动，按提示完成更新。");
                         }
                     });
                 }
@@ -5147,7 +5382,6 @@ namespace FreebuffController
                             updateFailed = true;
                             ApplyVersionUi(false);
                             SetStatus("下载更新失败：" + error.Message, ColNewVersion);
-                            TrayNotify("下载更新失败：" + error.Message);
                         }
                     });
                 }
@@ -5515,14 +5749,17 @@ namespace FreebuffController
                 SetStatus("汉化正在换文件 · 写入完成后自动继续启动…");
                 RunWhenHanhuaIdle(delegate
                 {
+                    EnsureLocalPatches("启动前");
                     LaunchIndexNow(rowIndex);
                 });
             }
             else if (StartAutoRestoreHanhua("启动前", delegate
             {
+                EnsureLocalPatches("启动前");
                 LaunchIndexNow(rowIndex);
             }) != RestoreOutcome.Started)
             {
+                EnsureLocalPatches("启动前");
                 LaunchIndexNow(rowIndex);
             }
         }
@@ -6980,7 +7217,6 @@ namespace FreebuffController
                         if (err != null)
                         {
                             SetStatus("汉化包更新失败：" + err, ColNewVersion);
-                            TrayNotify("汉化包更新失败：" + err);
                         }
                         else if (ver != null)
                         {
@@ -6988,7 +7224,10 @@ namespace FreebuffController
                             {
                                 SetStatus("汉化包 v" + ver + " 已就绪 · 自动应用待命。", ColGreen);
                             }
-                            StartAutoRestoreHanhua("汉化包已就绪", null);
+                            StartAutoRestoreHanhua("汉化包已就绪", delegate
+                            {
+                                EnsureLocalPatches("更新后");
+                            });
                         }
                         else if (mis != null)
                         {
@@ -7944,6 +8183,69 @@ namespace FreebuffController
                 WriteFileAtomic(path, "v2");
                 action("WriteFileAtomic：内容被替换", File.ReadAllText(path) == "v2", "");
                 action("WriteFileAtomic：不留临时文件", Directory.GetFiles(text, "atomic.txt.tmp-*").Length == 0, "");
+                // ===== 广告拦截注入 =====
+                // 这组盯的是「静默失效」：CSS 选择器失配不会报任何错，Freebuff 改版换个类名，
+                // 拦截就悄悄没了而用户和你都收不到信号。所以注入的幂等性、摘除的干净度、
+                // 类名自检的报警能力，三样都得打靶。
+                string abDir = Path.Combine(text, "adblock");
+                Directory.CreateDirectory(Path.Combine(abDir, "assets"));
+                string abIndex = Path.Combine(abDir, "index.html");
+                // 行尾故意混用 CRLF/LF——装机那份 index.html 就是混的（83 CRLF + 124 LF）
+                File.WriteAllText(abIndex, "<!doctype html>\n<html lang=\"zh-CN\">\n  <head>\n    <title>Freebuff 桌面版</title>\r\n  </head>\n  <body></body>\n</html>\n", new UTF8Encoding(false));
+                string abPristine = File.ReadAllText(abIndex);
+                string abCssPath = Path.Combine(abDir, "assets\\index-fake.css");
+                File.WriteAllText(abCssPath, BuildAdblockFakeCss(AdblockSelectors), new UTF8Encoding(false));
+                action("AdblockClassNameOf：组合选择器取最后一段（.msg.sponsored-task → sponsored-task）", AdblockClassNameOf(".msg.sponsored-task") == "sponsored-task", AdblockClassNameOf(".msg.sponsored-task"));
+                action("AdblockMissingClasses：类名全在 = 一个都不缺", AdblockMissingClasses(abDir).Count == 0, string.Join(",", AdblockMissingClasses(abDir).ToArray()));
+                // 前缀类名必须分开算：只剩 -composer 时不能把 partner-placement 判成「还在」
+                File.WriteAllText(abCssPath, ".partner-placement-composer{display:block}", new UTF8Encoding(false));
+                action("AdblockMissingClasses：前缀类名不被更长的同前缀类名顶替（partner-placement 应报缺）", AdblockMissingClasses(abDir).Contains("partner-placement"), string.Join(",", AdblockMissingClasses(abDir).ToArray()));
+                File.WriteAllText(abCssPath, BuildAdblockFakeCss(AdblockSelectors), new UTF8Encoding(false));
+                string abOnce = ApplyAdblockToHtml(abPristine, true);
+                string abTwice = ApplyAdblockToHtml(abOnce, true);
+                action("ApplyAdblockToHtml：注入后带 style 块", abOnce.Contains("<style id=\"" + AdblockStyleId + "\">"), "");
+                action("ApplyAdblockToHtml：幂等——注入两次与注入一次逐字节相同", abTwice == abOnce, "");
+                action("ApplyAdblockToHtml：只有一个 style 块（不会越注入越多）", Regex.Matches(abTwice, "<style id=\"" + AdblockStyleId + "\">").Count == 1, Regex.Matches(abTwice, "<style id=\"" + AdblockStyleId + "\">").Count.ToString());
+                action("ApplyAdblockToHtml：注入点落在 </head> 之前", abOnce.IndexOf("<style id=\"" + AdblockStyleId + "\">", StringComparison.Ordinal) < abOnce.IndexOf("</head>", StringComparison.Ordinal), "");
+                int abHits = 0;
+                for (int abI = 0; abI < AdblockSelectors.Length; abI++)
+                {
+                    if (abOnce.IndexOf("      " + AdblockSelectors[abI], StringComparison.Ordinal) >= 0)
+                    {
+                        abHits++;
+                    }
+                }
+                action("ApplyAdblockToHtml：" + AdblockSelectors.Length + " 条选择器全部写进了 CSS", abHits == AdblockSelectors.Length, abHits + "/" + AdblockSelectors.Length);
+                action("ApplyAdblockToHtml：关闭后整块摘除，逐字节回到原始", ApplyAdblockToHtml(abOnce, false) == abPristine, "");
+                action("ApplyAdblockToHtml：没有 </head> 时原样返回（绝不做半截注入）", ApplyAdblockToHtml("<html><body>x</body></html>", true) == "<html><body>x</body></html>", "");
+                action("ApplyAdblockToHtml：null 进 null 出（不抛）", ApplyAdblockToHtml(null, true) == null, "");
+                File.WriteAllText(abCssPath, ".sponsor-intermission{display:block}", new UTF8Encoding(false));
+                action("AdblockMissingClasses：类名缺失时必须报出来（不许静默失效）", AdblockMissingClasses(abDir).Count == AdblockSelectors.Length - 1, "缺 " + AdblockMissingClasses(abDir).Count + " 个");
+                action("AdblockMissingClasses：assets 目录不在时不报假警（按无法判断算）", AdblockMissingClasses(Path.Combine(text, "no-such-dir")).Count == 0, "");
+                ApplyAdblockConfigText(null);
+                action("ApplyAdblockConfigText：没有配置文件 = 关（新能力不偷偷生效）", !adblockEnabled, "");
+                ApplyAdblockConfigText("off");
+                action("ApplyAdblockConfigText：off = 关", !adblockEnabled, "");
+                ApplyAdblockConfigText(" ON ");
+                action("ApplyAdblockConfigText：只有 on 算开（大小写与首尾空白都容）", adblockEnabled, "");
+                ApplyAdblockConfigText("onn");
+                action("ApplyAdblockConfigText：onn 这种脏值 = 关", !adblockEnabled, "");
+                action("AdblockLinkText：开=「隐藏广告 ✓」、关=「隐藏广告」", AdblockLinkText(true) == "隐藏广告 ✓" && AdblockLinkText(false) == "隐藏广告", AdblockLinkText(true));
+                ApplyAdblockConfigText(null);
+                File.WriteAllText(abCssPath, BuildAdblockFakeCss(AdblockSelectors), new UTF8Encoding(false));
+                string abNote = ApplyAdblockToFile(abIndex, abDir, true);
+                action("ApplyAdblockToFile：注入真的落盘了", File.ReadAllText(abIndex).Contains("<style id=\"" + AdblockStyleId + "\">"), "");
+                action("ApplyAdblockToFile：全命中时状态文案不带「未命中」", abNote != null && abNote.IndexOf("未命中") < 0, abNote);
+                action("ApplyAdblockToFile：已是注入态再跑一次 = 无事可做（不重复写盘）", ApplyAdblockToFile(abIndex, abDir, true) == null, "");
+                File.WriteAllText(abCssPath, ".sponsor-intermission{display:block}", new UTF8Encoding(false));
+                File.WriteAllText(abIndex, abPristine, new UTF8Encoding(false));
+                string abWarn = ApplyAdblockToFile(abIndex, abDir, true);
+                action("ApplyAdblockToFile：类名缺失时状态文案必须带「未命中」", abWarn != null && abWarn.IndexOf("未命中") >= 0, abWarn);
+                ApplyAdblockToFile(abIndex, abDir, false);
+                action("ApplyAdblockToFile：关闭后落盘的文件回到原始", File.ReadAllText(abIndex) == abPristine, "");
+                action("ApplyAdblockToFile：不留 .tmp- 临时文件", Directory.GetFiles(abDir, "*.tmp-*").Length == 0, string.Join(",", Directory.GetFiles(abDir, "*.tmp-*")));
+                action("ApplyAdblockToFile：index.html 不在时安静返回（不抛不报）", ApplyAdblockToFile(Path.Combine(abDir, "nope.html"), abDir, true) == null, "");
+                adblockEnabled = false;
                 Dictionary<int, ProcRow> dictionary = new Dictionary<int, ProcRow>();
                 dictionary[10] = new ProcRow
                 {
@@ -7984,7 +8286,7 @@ namespace FreebuffController
                 string arg2;
                 try
                 {
-                    arg2 = (ControllerProxyAvailable() ? "连着代理 → 正常查额度" : "没有代理 → 整轮跳过");
+                    arg2 = (ControllerProxyAvailable() ? "连着代理 → 正常查额度" : "没有代理 → 额度走直连");
                 }
                 catch (Exception ex)
                 {
@@ -8004,7 +8306,7 @@ namespace FreebuffController
                 {
                     flag4 = true;
                 }
-                action("ControllerProxyRoute：不抛异常，且「连着代理」时路线与地址都得给出", !flag4 && (!flag3 || (!string.IsNullOrEmpty(kind) && !string.IsNullOrEmpty(address))) && (flag3 || (kind == null && address == null)), flag3 ? ("✓ " + kind + " " + address) : "✗ 未连代理");
+                action("ControllerProxyRoute：不抛异常，且「连着代理」时路线与地址都得给出", !flag4 && (!flag3 || (!string.IsNullOrEmpty(kind) && !string.IsNullOrEmpty(address))) && (flag3 || (kind == null && address == null)), flag3 ? ("✓ " + kind + " " + address) : "✗ 没有可用代理");
                 string text13 = Path.Combine(text, "junction", "slots", "slot-5", "projects");
                 Directory.CreateDirectory(Path.GetDirectoryName(text13));
                 int num = CreateJunctionNative(text13, text11);
@@ -8022,24 +8324,58 @@ namespace FreebuffController
                 string text16 = "socks5://127.0.0.1:" + ((IPEndPoint)fakeSocks.LocalEndpoint).Port;
                 action("ProxyBrokenReason：判定可用的代理不报掉线（不误报）", ProxyUsable(text16) && ProxyBrokenReason(text16) == null, text16);
                 fakeSocks.Stop();
-                QuotaInfo quotaInfo = OfflineQuota(null);
-                QuotaInfo quotaInfo2 = new QuotaInfo();
-                quotaInfo2.Text = "日12/40";
-                QuotaInfo quotaInfo3 = OfflineQuota(quotaInfo2);
-                QuotaInfo quotaInfo4 = OfflineQuota(quotaInfo3);
-                action("OfflineQuota：没连代理时显示「未连代理」而不是旧数字", quotaInfo.Text == "未连代理" && quotaInfo.Offline && quotaInfo.Text != "日12/40", quotaInfo.Text);
-                action("OfflineQuota：上次读到过的值降级到悬停提示", quotaInfo3.Tip != null && quotaInfo3.Tip.Contains("日12/40"), quotaInfo3.Tip);
-                action("OfflineQuota：连续跳过不会把「未连代理」当成上次的值", quotaInfo4.Tip != null && !quotaInfo4.Tip.Contains("未连代理"), quotaInfo4.Tip);
+                action("QuotaRouteFor：off = 直连（系统代理在也一样）", QuotaRouteFor("off", null, "http://127.0.0.1:10808") == "", "off");
+                action("QuotaRouteFor：manual = 你填的地址（优先于探测结果）", QuotaRouteFor("manual", "http://127.0.0.1:10808", "http://127.0.0.1:9999") == "http://127.0.0.1:10808", "");
+                action("QuotaRouteFor：auto = 探测到的本地代理", QuotaRouteFor("auto", null, "http://127.0.0.1:10808") == "http://127.0.0.1:10808", "");
+                action("QuotaRouteFor：auto 没探测到 = 直连", QuotaRouteFor("auto", null, null) == "", "");
+                action("QuotaRouteFor：SOCKS = 直连（控制器请求不支持 SOCKS）", QuotaRouteFor("manual", "socks5://127.0.0.1:1080", null) == "", "");
                 ApplyProxyConfigText(null);
                 action("ProxyConfigText：无配置 = auto", localProxyMode == "auto" && manualProxyUrl == null, localProxyMode);
                 ApplyProxyConfigText("off\r\n");
                 action("ProxyConfigText：off（末尾带换行） = 停用", localProxyMode == "off" && manualProxyUrl == null, localProxyMode);
                 action("ProxyConfigText：off 时启动不注入代理（LaunchProxyUrl 为 null）", LaunchProxyUrl() == null, "");
+                action("QuotaRoute：当前是 off → 额度直连", QuotaRoute() == "", "off → 「" + QuotaRoute() + "」");
                 ApplyProxyConfigText("http://127.0.0.1:10808");
                 action("ProxyConfigText：URL = manual 且按原文保留", localProxyMode == "manual" && manualProxyUrl == "http://127.0.0.1:10808", localProxyMode + " " + (manualProxyUrl ?? ""));
                 ApplyProxyConfigText("   ");
                 action("ProxyConfigText：全空白 = auto（不会当成坏配置）", localProxyMode == "auto" && manualProxyUrl == null, localProxyMode);
+                // 本机补丁（LocalPatches）：应用 / 幂等 / 锚点缺失不写盘
+                string lpRoot = Path.Combine(text, "lp-res");
+                string lpUiDir = Path.Combine(lpRoot, "orchestrator", "ui", "assets");
+                string lpUi = Path.Combine(lpUiDir, "index-lp.js");
+                Directory.CreateDirectory(lpUiDir);
+                File.WriteAllText(lpUi, "vme=\"freebuff-advanced-mode\";function wut(){try{return localStorage.getItem(vme)===\"true\"}catch{return!1}}\n", new UTF8Encoding(false));
+                List<LocalPatches.Outcome> lpFirst = LocalPatches.ApplyAll(lpRoot);
+                bool lpUiApplied = false;
+                foreach (LocalPatches.Outcome lp in lpFirst)
+                {
+                    if (lp.File == lpUi && lp.Applied == 1)
+                    {
+                        lpUiApplied = true;
+                    }
+                }
+                action("LocalPatches：高级模式默认开启被应用", lpUiApplied && File.ReadAllText(lpUi).IndexOf("!==\"false\"", StringComparison.Ordinal) >= 0, lpUi);
+                List<LocalPatches.Outcome> lpSecond = LocalPatches.ApplyAll(lpRoot);
+                bool lpIdempotent = true;
+                foreach (LocalPatches.Outcome lp in lpSecond)
+                {
+                    if (lp.File == lpUi && lp.Applied != 0)
+                    {
+                        lpIdempotent = false;
+                    }
+                }
+                action("LocalPatches：再跑一次不重复写（幂等）", lpIdempotent, "");
+                string lpBadRoot = Path.Combine(text, "lp-bad");
+                Directory.CreateDirectory(Path.Combine(lpBadRoot, "orchestrator", "ui", "assets"));
+                string lpBadUi = Path.Combine(lpBadRoot, "orchestrator", "ui", "assets", "index-lp.js");
+                string lpBadOrc = Path.Combine(lpBadRoot, "orchestrator", "orchestrator.js");
+                File.WriteAllText(lpBadUi, "nothing here\n", new UTF8Encoding(false));
+                File.WriteAllText(lpBadOrc, "function unrelated() {}\n", new UTF8Encoding(false));
+                LocalPatches.ApplyAll(lpBadRoot);
+                action("LocalPatches：锚点缺失时一个字节都不写", File.ReadAllText(lpBadUi) == "nothing here\n" && File.ReadAllText(lpBadOrc) == "function unrelated() {}\n", "");
+                action("LocalPatches：锚点缺失时不留备份文件", Directory.GetFiles(lpBadRoot, "*.pre-localpatch-*", SearchOption.AllDirectories).Length == 0, "");
             }
+
             catch (Exception ex2)
             {
                 failed++;
@@ -8080,6 +8416,16 @@ namespace FreebuffController
             {
                 File.WriteAllText(Path.Combine(dir, "assets\\index-abc.js"), "// bundle\n", new UTF8Encoding(false));
             }
+        }
+
+        private static string BuildAdblockFakeCss(string[] selectors)
+        {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < selectors.Length; i++)
+            {
+                sb.Append(".").Append(AdblockClassNameOf(selectors[i])).Append("{display:block}");
+            }
+            return sb.ToString();
         }
 
         internal static void EnsureAgentsMdEnabled()
@@ -8130,7 +8476,36 @@ namespace FreebuffController
             }
         }
 
-        private static bool WriteFileAtomic(string path, string text)
+
+        /// <summary>
+        /// 应用本机补丁（不进汉化包、不做界面提示）：控制器启动、启动实例前、汉化恢复
+        /// 完成之后各调一次。正常结果只写 local-patches.status.txt；锚点未命中或异常
+        /// 才写失败日志。
+        /// </summary>
+        private void EnsureLocalPatches(string why)
+        {
+            try
+            {
+                List<LocalPatches.Outcome> outcomes = LocalPatches.ApplyAll(FreebuffResources);
+                foreach (LocalPatches.Outcome outcome in outcomes)
+                {
+                    if (outcome.Error != null)
+                    {
+                        LogFail("[本机补丁] " + why + " 失败：" + outcome.File + " ← " + outcome.Error);
+                    }
+                    else if (outcome.Missing.Length > 0)
+                    {
+                        LogFail("[本机补丁] " + why + " 锚点未命中（上游可能改版，需人工重判）：" + outcome.File + " ← " + string.Join("、", outcome.Missing));
+                    }
+                }
+                LocalPatches.WriteStatusFile(outcomes);
+            }
+            catch (Exception ex)
+            {
+                LogFail("[本机补丁] 应用异常（" + why + "）", ex);
+            }
+        }
+        internal static bool WriteFileAtomic(string path, string text)
         {
             string text2 = path + ".tmp-" + Guid.NewGuid().ToString("N");
             try
@@ -8492,10 +8867,6 @@ namespace FreebuffController
                     {
                         string text2 = ((error != null) ? ((wasApplied ? "自动应用汉化包失败：" : "自动恢复汉化失败：") + HanhuaErrorText(error) + "（等下次自动应用或重启控制器）") : (broken ? "已重新应用汉化 ✓ 下次打开 Freebuff 就是中文。" : (wasApplied ? "已自动应用新汉化包 ✓ 下次打开 Freebuff 就是新版中文。" : "已自动恢复汉化 ✓ 下次打开 Freebuff 就是中文。")));
                         SetStatus(text2, (error == null) ? ColGreen : ColNewVersion);
-                        if (error != null)
-                        {
-                            TrayNotify(text2);
-                        }
                         ShowStatusAfterIdle((error == null) ? pruneNote : null);
                         RefreshHanhuaUi();
                         if (onDone != null)
@@ -8784,6 +9155,408 @@ namespace FreebuffController
             }
             catch
             {
+            }
+        }
+    }
+    // ═══════════════════════════════════════════════════════════════════════
+    // 本机补丁（LocalPatches）—— 不进汉化包、不出现在控制器界面上
+    //
+    // 只改本机装机文件，把两件已经在用的本机改动固定下来：
+    //   · resources\orchestrator\orchestrator.js
+    //       压缩预算改用服务端目录下发的真实窗口（按 key / handle / 编译 id 登记），
+    //       预算 = 窗口 − 40960，阈值 = 0.9 × 预算；空闲（缓存过期）压缩门槛从
+    //       14 万（DeepSeek 的 4 万）统一抬到 90 万。
+    //   · resources\orchestrator\ui\assets\index-*.js
+    //       高级模式默认开启：读取逻辑 getItem(...) === "true" 改为 !== "false"。
+    //
+    // 时机：控制器启动、启动实例前、汉化恢复完成之后各跑一次。静默执行——正常结果
+    // 只写 <控制器目录>\local-patches.status.txt；锚点未命中或写盘失败才写
+    // Program.FailLogPath。全有或全无：任一锚点缺失（上游改版）就整文件不写。
+    // ═══════════════════════════════════════════════════════════════════════
+    internal static class LocalPatches
+    {
+        internal sealed class Outcome
+        {
+            internal string File = "";
+            internal string Backup = "";
+            internal int Applied;
+            internal int Skipped;
+            internal string[] Missing = new string[0];
+            internal string Error;
+
+            internal bool Changed { get { return Applied > 0; } }
+        }
+
+        private sealed class Edit
+        {
+            internal string Name;
+            internal string Old;
+            internal string New;
+            // 「同一处改动的另一种前置形态」：命中不到是正常的，例如原始文件没有
+            // 上一轮补丁留下的中间态文本。
+            internal bool Optional;
+
+            internal Edit(string name, string oldText, string newText)
+                : this(name, oldText, newText, false)
+            {
+            }
+
+            internal Edit(string name, string oldText, string newText, bool optional)
+            {
+                Name = name;
+                Old = oldText;
+                New = newText;
+                Optional = optional;
+            }
+        }
+
+        private static string L(params string[] lines)
+        {
+            return string.Join("\n", lines);
+        }
+
+        private static Edit[] OrchestratorEdits()
+        {
+            string budgetNew = L(
+                "var FREEBUFF_WINDOW_BY_MODEL = {};",
+                "function contextPrunerBudgetForModel(model) {",
+                "  let catalogWindow = FREEBUFF_WINDOW_BY_MODEL && FREEBUFF_WINDOW_BY_MODEL[model] ? FREEBUFF_WINDOW_BY_MODEL[model] : void 0;",
+                @"  let knownWindow = catalogWindow ?? (typeof FREEBUFF_MODEL_CONTEXT_WINDOWS === ""object"" && FREEBUFF_MODEL_CONTEXT_WINDOWS ? FREEBUFF_MODEL_CONTEXT_WINDOWS[model] : void 0);",
+                "  return SMALL_CONTEXT_MODELS.has(model) ? 250000 : knownWindow ? knownWindow - 40960 : 400000;",
+                "}");
+            return new Edit[]
+            {
+                new Edit("压缩预算函数 → 目录窗口优先",
+                    L("function contextPrunerBudgetForModel(model) {",
+                      "  return SMALL_CONTEXT_MODELS.has(model) ? 250000 : 400000;",
+                      "}"),
+                    budgetNew),
+                new Edit("压缩预算函数（半套补丁的中间态）→ 目录窗口优先",
+                    L("function contextPrunerBudgetForModel(model) {",
+                      @"  let knownWindow = typeof FREEBUFF_MODEL_CONTEXT_WINDOWS === ""object"" && FREEBUFF_MODEL_CONTEXT_WINDOWS ? FREEBUFF_MODEL_CONTEXT_WINDOWS[model] : void 0;",
+                      "  return SMALL_CONTEXT_MODELS.has(model) ? 250000 : knownWindow ? knownWindow - 40960 : 400000;",
+                      "}"),
+                    budgetNew, true),
+                new Edit("压缩阈值系数 0.8 → 0.9",
+                    L("function compactionThreshold(maxContextLength) {",
+                      "  return Math.floor(maxContextLength * 0.8);",
+                      "}"),
+                    L("function compactionThreshold(maxContextLength) {",
+                      "  return Math.floor(maxContextLength * 0.9);",
+                      "}")),
+                new Edit("空闲（缓存过期）压缩门槛 → 90 万",
+                    L("var DEFAULT_COMPACTION_POLICY = {",
+                      "  cacheExpiryMs: 3600000,",
+                      "  cacheExpiryMinTokens: 140000",
+                      "}, DEEPSEEK_FLASH_COMPACTION_POLICY = {",
+                      "  cacheExpiryMs: 900000,",
+                      "  cacheExpiryMinTokens: 40000",
+                      "};"),
+                    L("var DEFAULT_COMPACTION_POLICY = {",
+                      "  cacheExpiryMs: 3600000,",
+                      "  cacheExpiryMinTokens: 900000",
+                      "}, DEEPSEEK_FLASH_COMPACTION_POLICY = {",
+                      "  cacheExpiryMs: 900000,",
+                      "  cacheExpiryMinTokens: 900000",
+                      "};")),
+                new Edit("模板策略兜底（服务端旧策略不得盖掉）",
+                    "    compactContext: options2.compaction ?? compactionPolicyForModel(model),",
+                    "    compactContext: options2.compaction === !1 ? !1 : (() => { let policy2 = options2.compaction ?? compactionPolicyForModel(model); if (policy2 === !0) policy2 = compactionPolicyForModel(model); return { ...policy2, cacheExpiryMs: policy2.cacheExpiryMs ?? DEFAULT_COMPACTION_POLICY.cacheExpiryMs, cacheExpiryMinTokens: Math.max(policy2.cacheExpiryMinTokens ?? 0, 900000) }; })(),"),
+                new Edit("运行循环取 max(服务端, 本地预算)",
+                    "maxContextLength = policy.maxContextLength ?? contextPrunerBudgetForModel(agentTemplate.model), thresholdTokens",
+                    "maxContextLength = Math.max(policy.maxContextLength ?? 0, contextPrunerBudgetForModel(agentTemplate.model)), thresholdTokens"),
+                new Edit("界面显示同口径",
+                    "    compactionThresholdTokens: compactionThreshold(catalog?.compaction?.maxContextLength ?? contextPrunerBudgetForModel(model)),",
+                    "    compactionThresholdTokens: compactionThreshold(Math.max(catalog?.compaction?.maxContextLength ?? 0, contextPrunerBudgetForModel(model))),"),
+                new Edit("目录行绑定时登记窗口",
+                    L("  let compiledModelId = compiledFreebuffModelIdOfRow(row);",
+                      "  return {",
+                      "    handle: row.handle,"),
+                    L("  let compiledModelId = compiledFreebuffModelIdOfRow(row);",
+                      "  if (row.contextWindow) {",
+                      "    FREEBUFF_WINDOW_BY_MODEL = FREEBUFF_WINDOW_BY_MODEL || {};",
+                      "    FREEBUFF_WINDOW_BY_MODEL[row.key] = row.contextWindow;",
+                      "    if (row.handle)",
+                      "      FREEBUFF_WINDOW_BY_MODEL[row.handle] = row.contextWindow;",
+                      "    if (model)",
+                      "      FREEBUFF_WINDOW_BY_MODEL[model] = row.contextWindow;",
+                      "    if (compiledModelId)",
+                      "      FREEBUFF_WINDOW_BY_MODEL[compiledModelId] = row.contextWindow;",
+                      "  }",
+                      "  return {",
+                      "    handle: row.handle,")),
+                new Edit("目录刷新时登记全部窗口",
+                    L("    for (let row of next?.rows ?? []) {",
+                      "      let id2 = compiledFreebuffModelIdOfRow(row);",
+                      "      if (id2)",
+                      "        this.knownCompiled.set(row.key, id2);",
+                      "    }"),
+                    L("    for (let row of next?.rows ?? []) {",
+                      "      let id2 = compiledFreebuffModelIdOfRow(row);",
+                      "      if (id2)",
+                      "        this.knownCompiled.set(row.key, id2);",
+                      "      if (row.contextWindow) {",
+                      "        FREEBUFF_WINDOW_BY_MODEL = FREEBUFF_WINDOW_BY_MODEL || {};",
+                      "        FREEBUFF_WINDOW_BY_MODEL[row.key] = row.contextWindow;",
+                      "        if (row.handle)",
+                      "          FREEBUFF_WINDOW_BY_MODEL[row.handle] = row.contextWindow;",
+                      "        if (id2)",
+                      "          FREEBUFF_WINDOW_BY_MODEL[id2] = row.contextWindow;",
+                      "      }",
+                      "    }")),
+            };
+        }
+
+        /// <summary>
+        /// 打完补丁后结果里必须出现的标记；少一个就说明这版上游改了写法，宁可整文件不写。
+        /// </summary>
+        private static string[] RequiredMarkers()
+        {
+            return new string[]
+            {
+                "FREEBUFF_WINDOW_BY_MODEL",
+                "Math.floor(maxContextLength * 0.9)",
+                "cacheExpiryMinTokens: 900000",
+                "policy2",
+                "Math.max(policy.maxContextLength ?? 0",
+                "Math.max(catalog?.compaction?.maxContextLength ?? 0",
+            };
+        }
+
+        private static int CountOccurrences(string haystack, string needle)
+        {
+            if (string.IsNullOrEmpty(needle))
+            {
+                return 0;
+            }
+            int count = 0;
+            int index = 0;
+            while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+            {
+                count++;
+                index += needle.Length;
+            }
+            return count;
+        }
+
+        private static Outcome ApplyEdits(string path, Edit[] edits)
+        {
+            Outcome outcome = new Outcome();
+            outcome.File = path;
+            if (!File.Exists(path))
+            {
+                outcome.Error = "文件不存在";
+                return outcome;
+            }
+            try
+            {
+                string original = File.ReadAllText(path, new UTF8Encoding(false));
+                bool crlf = original.IndexOf("\r\n", StringComparison.Ordinal) >= 0;
+                string text = crlf ? original.Replace("\r\n", "\n") : original;
+                List<string> missing = new List<string>();
+                List<Edit> todo = new List<Edit>();
+                int skipped = 0;
+                foreach (Edit edit in edits)
+                {
+                    if (text.IndexOf(edit.New, StringComparison.Ordinal) >= 0)
+                    {
+                        skipped++;
+                        continue;
+                    }
+                    int hits = CountOccurrences(text, edit.Old);
+                    if (hits == 0)
+                    {
+                        if (edit.Optional)
+                        {
+                            skipped++;
+                        }
+                        else
+                        {
+                            missing.Add(edit.Name);
+                        }
+                        continue;
+                    }
+                    if (hits > 1)
+                    {
+                        missing.Add(edit.Name + "（锚点命中 " + hits + " 次）");
+                        continue;
+                    }
+                    todo.Add(edit);
+                }
+                string next = text;
+                foreach (Edit edit in todo)
+                {
+                    next = next.Replace(edit.Old, edit.New);
+                }
+                // 万一锚点被上游改写，可选条目会让「该改的没改」悄悄溜过去；
+                // 用必备标记做终检：任何一个不在结果里，就整文件不写。
+                foreach (string marker in RequiredMarkers())
+                {
+                    if (next.IndexOf(marker, StringComparison.Ordinal) < 0)
+                    {
+                        missing.Add("结果里缺少必备标记：" + marker);
+                    }
+                }
+                outcome.Skipped = skipped;
+                outcome.Missing = missing.ToArray();
+                // 全有或全无：只要有一处锚点没命中（上游改版），这个文件就一个字节都不写，
+                // 留给人工重判——半套补丁比不补更难排查。
+                if (missing.Count == 0 && todo.Count > 0)
+                {
+                    text = next;
+                    outcome.Applied = todo.Count;
+                    outcome.Backup = path + ".pre-localpatch-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                    File.Copy(path, outcome.Backup, true);
+                    if (!MainForm.WriteFileAtomic(path, crlf ? text.Replace("\n", "\r\n") : text))
+                    {
+                        outcome.Error = "写入失败";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                outcome.Error = ex.GetType().Name + ": " + ex.Message;
+            }
+            return outcome;
+        }
+
+        private static Outcome ApplyAdvancedModeDefault(string path)
+        {
+            Outcome outcome = new Outcome();
+            outcome.File = path;
+            try
+            {
+                string text = File.ReadAllText(path, new UTF8Encoding(false));
+                Match key = Regex.Match(text, "([A-Za-z_$][A-Za-z0-9_$]*)=\"freebuff-advanced-mode\"");
+                if (!key.Success)
+                {
+                    outcome.Missing = new string[] { "找不到 freebuff-advanced-mode 的键名变量" };
+                    return outcome;
+                }
+                string name = key.Groups[1].Value;
+                string already = "localStorage.getItem(" + name + ")!==" + "\"" + "false" + "\"";
+                string before = "localStorage.getItem(" + name + ")===" + "\"" + "true" + "\"";
+                if (text.IndexOf(already, StringComparison.Ordinal) >= 0)
+                {
+                    outcome.Skipped = 1;
+                    return outcome;
+                }
+                int hits = CountOccurrences(text, before);
+                if (hits != 1)
+                {
+                    outcome.Missing = new string[] { "高级模式读取锚点命中 " + hits + " 次（预期 1 次）" };
+                    return outcome;
+                }
+                outcome.Applied = 1;
+                outcome.Backup = path + ".pre-localpatch-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                File.Copy(path, outcome.Backup, true);
+                if (!MainForm.WriteFileAtomic(path, text.Replace(before, already)))
+                {
+                    outcome.Error = "写入失败";
+                }
+            }
+            catch (Exception ex)
+            {
+                outcome.Error = ex.GetType().Name + ": " + ex.Message;
+            }
+            return outcome;
+        }
+
+        internal static List<Outcome> ApplyAll(string resourcesDir)
+        {
+            List<Outcome> outcomes = new List<Outcome>();
+            outcomes.Add(ApplyEdits(
+                Path.Combine(resourcesDir, "orchestrator", "orchestrator.js"),
+                OrchestratorEdits()));
+            List<string> bundles = new List<string>();
+            try
+            {
+                string assets = Path.Combine(resourcesDir, "orchestrator", "ui", "assets");
+                if (Directory.Exists(assets))
+                {
+                    foreach (string file in Directory.GetFiles(assets, "index-*.js"))
+                    {
+                        if (Path.GetFileName(file).IndexOf(".pre-", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            continue;
+                        }
+                        try
+                        {
+                            if (File.ReadAllText(file, new UTF8Encoding(false)).IndexOf("freebuff-advanced-mode", StringComparison.Ordinal) >= 0)
+                            {
+                                bundles.Add(file);
+                            }
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+            if (bundles.Count == 0)
+            {
+                Outcome outcome = new Outcome();
+                outcome.File = Path.Combine(resourcesDir, "orchestrator", "ui", "assets", "index-*.js");
+                outcome.Missing = new string[] { "找不到含 freebuff-advanced-mode 的 UI bundle" };
+                outcomes.Add(outcome);
+            }
+            else
+            {
+                foreach (string bundle in bundles)
+                {
+                    outcomes.Add(ApplyAdvancedModeDefault(bundle));
+                }
+            }
+            return outcomes;
+        }
+
+        internal static void WriteStatusFile(List<Outcome> outcomes)
+        {
+            try
+            {
+                List<string> lines = new List<string>();
+                lines.Add("# 本机补丁状态 · " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                foreach (Outcome outcome in outcomes)
+                {
+                    string state;
+                    if (outcome.Error != null)
+                    {
+                        state = "失败：" + outcome.Error;
+                    }
+                    else if (outcome.Missing.Length > 0)
+                    {
+                        state = "锚点未命中（上游可能改版，需人工重判）：" + string.Join("、", outcome.Missing);
+                    }
+                    else if (outcome.Applied > 0)
+                    {
+                        state = "已应用 " + outcome.Applied + " 处（备份 " + Path.GetFileName(outcome.Backup) + "）";
+                    }
+                    else
+                    {
+                        state = "已是最新（跳过 " + outcome.Skipped + " 处）";
+                    }
+                    lines.Add(state + "  ←  " + outcome.File);
+                }
+                MainForm.WriteFileAtomic(StatusPath(), string.Join(Environment.NewLine, lines.ToArray()) + Environment.NewLine);
+            }
+            catch
+            {
+            }
+        }
+
+        internal static string StatusPath()
+        {
+            try
+            {
+                string exe = Assembly.GetEntryAssembly().Location;
+                return Path.Combine(Path.GetDirectoryName(exe), "local-patches.status.txt");
+            }
+            catch
+            {
+                return Path.Combine(Path.GetTempPath(), "freebuff-local-patches.status.txt");
             }
         }
     }

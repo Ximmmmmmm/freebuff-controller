@@ -11,7 +11,7 @@ rem 检查目标 exe 是否正在运行（避免报晦涩的 CS0016 文件占用
 tasklist /fi "imagename eq FreebuffController.exe" 2>nul | "%SystemRoot%\System32\find.exe" /i "FreebuffController.exe" >nul
 if %errorlevel%==0 (
   echo [提示] 检测到 FreebuffController.exe 正在后台运行！
-  echo 请在系统托盘右键退出控制器后再编译，以避免文件被锁定。
+  echo 请先关闭控制器窗口（点右上角 ✕）再编译，以避免文件被锁定。
   exit /b 1
 )
 
