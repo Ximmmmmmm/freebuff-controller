@@ -629,6 +629,13 @@ namespace FreebuffController
                 animTimer.Start();
             }
 
+            protected override void OnBackColorChanged(EventArgs e)
+            {
+                base.OnBackColorChanged(e);
+                shownColor = Color.Empty;
+                Invalidate();
+            }
+
             protected override void OnEnabledChanged(EventArgs e)
             {
                 base.OnEnabledChanged(e);
@@ -1982,6 +1989,14 @@ namespace FreebuffController
 
             private readonly Label portProbeLabel = new Label();
 
+            private readonly Label lblFoot = new Label();
+
+            private readonly RoundButton btnModeAuto = new RoundButton();
+
+            private readonly RoundButton btnModeOff = new RoundButton();
+
+            private readonly RoundButton btnModeManual = new RoundButton();
+
             public bool Changed { get; private set; }
 
             public ProxySettingsDialog()
@@ -1996,92 +2011,189 @@ namespace FreebuffController
                 base.MaximizeBox = false;
                 base.ShowInTaskbar = false;
                 base.StartPosition = FormStartPosition.CenterParent;
-                Label value = new Label
+
+                Label tipLabel = new Label
                 {
                     AutoSize = false,
-                    Text = "额度获取跟着这里的设置走：设了代理走代理，没设（off / 未探测到）走直连。其它网络走 本地代理 → 系统代理 → 直连。",
-                    Bounds = new Rectangle(16, 10, 428, 36),
-                    ForeColor = ColSub
+                    Text = "点击模式即可直接切换并立即生效，无需保存：",
+                    Bounds = new Rectangle(16, 12, 428, 24),
+                    ForeColor = ColSub,
+                    Font = new Font("Microsoft YaHei UI", 9f),
+                    TextAlign = ContentAlignment.MiddleLeft
                 };
-                base.Controls.Add(value);
-                Label value2 = new Label
-                {
-                    AutoSize = false,
-                    Text = "本地代理地址（留空 = 自动探测常见端口；off = 停用）",
-                    Bounds = new Rectangle(16, 52, 428, 18)
-                };
-                base.Controls.Add(value2);
-                urlBox.Bounds = new Rectangle(16, 72, 228, 25);
-                urlBox.Text = CurrentSettingText();
-                base.Controls.Add(urlBox);
-                RoundButton btnQuickAuto = new RoundButton
-                {
-                    Text = "⚡ 自动探测",
-                    Bounds = new Rectangle(252, 72, 92, 25),
-                    BackColor = ColNeutral,
-                    ForeColor = ColText,
-                    HoverBack = ColNeutralHover,
-                    Cursor = Cursors.Hand,
-                    Font = new Font("Microsoft YaHei UI", 9f)
-                };
-                btnQuickAuto.Click += delegate
+                base.Controls.Add(tipLabel);
+
+                InitModeButton(btnModeAuto, "⚡ 自动探测", 16, 138, delegate
                 {
                     ApplySetting("");
-                };
-                base.Controls.Add(btnQuickAuto);
-                RoundButton btnQuickOff = new RoundButton
+                });
+                InitModeButton(btnModeOff, "🌐 直连使用", 162, 138, delegate
                 {
-                    Text = "🌐 设为直连",
-                    Bounds = new Rectangle(352, 72, 92, 25),
+                    ApplySetting("off");
+                });
+                InitModeButton(btnModeManual, "⚙ 自定义代理", 308, 136, delegate
+                {
+                    string u = urlBox.Text.Trim();
+                    if (!string.IsNullOrEmpty(u) && !u.Equals("off", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ApplyCustomUrl();
+                    }
+                    else
+                    {
+                        urlBox.Focus();
+                        urlBox.SelectAll();
+                    }
+                });
+
+                Label lblCustom = new Label
+                {
+                    AutoSize = false,
+                    Text = "自定义地址：",
+                    Bounds = new Rectangle(16, 88, 75, 24),
+                    ForeColor = ColSub,
+                    Font = new Font("Microsoft YaHei UI", 9f),
+                    TextAlign = ContentAlignment.MiddleLeft
+                };
+                base.Controls.Add(lblCustom);
+
+                urlBox.Bounds = new Rectangle(92, 87, 272, 24);
+                urlBox.Font = new Font("Microsoft YaHei UI", 9f);
+                urlBox.KeyDown += delegate(object s, KeyEventArgs e)
+                {
+                    if (e.KeyCode == Keys.Enter)
+                    {
+                        e.Handled = true;
+                        e.SuppressKeyPress = true;
+                        ApplyCustomUrl();
+                    }
+                };
+                base.Controls.Add(urlBox);
+
+                RoundButton btnApplyUrl = new RoundButton
+                {
+                    Text = "应用",
+                    Bounds = new Rectangle(372, 86, 72, 26),
                     BackColor = ColNeutral,
                     ForeColor = ColText,
                     HoverBack = ColNeutralHover,
+                    BorderColor = ColLine,
                     Cursor = Cursors.Hand,
                     Font = new Font("Microsoft YaHei UI", 9f)
                 };
-                btnQuickOff.Click += delegate
+                btnApplyUrl.Click += delegate
                 {
-                    ApplySetting("off");
+                    ApplyCustomUrl();
                 };
-                base.Controls.Add(btnQuickOff);
+                base.Controls.Add(btnApplyUrl);
+
                 stateLabel.AutoSize = false;
-                stateLabel.Bounds = new Rectangle(16, 102, 428, 34);
+                stateLabel.Bounds = new Rectangle(16, 118, 428, 34);
+                stateLabel.Font = new Font("Microsoft YaHei UI", 9f);
                 base.Controls.Add(stateLabel);
+
                 portProbeLabel.AutoSize = false;
-                portProbeLabel.Bounds = new Rectangle(16, 140, 428, 18);
+                portProbeLabel.Bounds = new Rectangle(16, 154, 428, 18);
                 portProbeLabel.ForeColor = ColSub;
+                portProbeLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
                 base.Controls.Add(portProbeLabel);
-                Label value3 = new Label
-                {
-                    AutoSize = false,
-                    Text = "保存后立即生效：控制器网络请求与之后启动的实例都使用新值。",
-                    Bounds = new Rectangle(16, 162, 428, 18),
-                    ForeColor = ColSub
-                };
-                base.Controls.Add(value3);
-                Button button3 = MakeButton("保存", 242, ColAccent, ColAccentHover);
-                button3.Click += delegate
-                {
-                    ApplySetting(urlBox.Text.Trim());
-                };
-                Button button4 = MakeButton("取消", 348, ColNeutral, ColNeutralHover);
-                button4.DialogResult = DialogResult.Cancel;
-                base.CancelButton = button4;
+
+                lblFoot.AutoSize = false;
+                lblFoot.Bounds = new Rectangle(16, 186, 320, 32);
+                lblFoot.ForeColor = ColGreen;
+                lblFoot.Font = new Font("Microsoft YaHei UI", 8.5f);
+                lblFoot.TextAlign = ContentAlignment.MiddleLeft;
+                lblFoot.Text = "✓ 设置已实时生效并注入运行环境。";
+                base.Controls.Add(lblFoot);
+
+                Button btnClose = MakeButton("关闭", 348, ColNeutral, ColNeutralHover);
+                btnClose.DialogResult = DialogResult.OK;
+                base.CancelButton = btnClose;
+
+                RefreshModeButtons();
                 UpdateState();
                 ScaleUi(this, DpiScale());
             }
 
-            private static string CurrentSettingText()
+            private void InitModeButton(RoundButton btn, string text, int x, int width, EventHandler onClick)
             {
-                if (localProxyMode == "off")
+                btn.Text = text;
+                btn.Bounds = new Rectangle(x, 44, width, 32);
+                btn.Radius = 6;
+                btn.BackColor = ColNeutral;
+                btn.ForeColor = ColText;
+                btn.HoverBack = ColNeutralHover;
+                btn.BorderColor = ColLine;
+                btn.Cursor = Cursors.Hand;
+                btn.Font = new Font("Microsoft YaHei UI", 9f);
+                btn.Click += onClick;
+                base.Controls.Add(btn);
+            }
+
+            private void SetButtonModeStyle(RoundButton btn, string label, bool active)
+            {
+                btn.Text = label + (active ? " ✓" : "");
+                if (active)
                 {
-                    return "off";
+                    btn.BackColor = ColAccent;
+                    btn.HoverBack = ColAccentHover;
+                    btn.ForeColor = Color.White;
+                    btn.BorderColor = Color.Empty;
                 }
-                if (localProxyMode == "manual")
+                else
                 {
-                    return manualProxyUrl;
+                    btn.BackColor = ColNeutral;
+                    btn.HoverBack = ColNeutralHover;
+                    btn.ForeColor = ColText;
+                    btn.BorderColor = ColLine;
                 }
-                return "";
+                btn.Invalidate();
+            }
+
+            private void RefreshModeButtons()
+            {
+                bool isAuto = (localProxyMode == "auto");
+                bool isOff = (localProxyMode == "off");
+                bool isManual = (localProxyMode == "manual");
+
+                SetButtonModeStyle(btnModeAuto, "⚡ 自动探测", isAuto);
+                SetButtonModeStyle(btnModeOff, "🌐 直连使用", isOff);
+                SetButtonModeStyle(btnModeManual, "⚙ 自定义代理", isManual);
+
+                if (isManual)
+                {
+                    urlBox.Text = manualProxyUrl ?? "";
+                }
+                else if (isOff)
+                {
+                    urlBox.Text = "off";
+                }
+                else
+                {
+                    urlBox.Text = "";
+                }
+            }
+
+            private void ApplyCustomUrl()
+            {
+                string val = urlBox.Text.Trim();
+                if (string.IsNullOrEmpty(val))
+                {
+                    ApplySetting("");
+                }
+                else if (val.Equals("off", StringComparison.OrdinalIgnoreCase))
+                {
+                    ApplySetting("off");
+                }
+                else
+                {
+                    Uri result;
+                    if (!Uri.TryCreate(val, UriKind.Absolute, out result))
+                    {
+                        MessageBox.Show(this, "请输入有效的完整地址，例如 http://127.0.0.1:10808", "代理设置", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                        return;
+                    }
+                    ApplySetting(val);
+                }
             }
 
             private void ApplySetting(string value)
@@ -2112,7 +2224,19 @@ namespace FreebuffController
                 }
                 ReloadProxyConfig();
                 Changed = true;
-                urlBox.Text = CurrentSettingText();
+                RefreshModeButtons();
+                if (localProxyMode == "off")
+                {
+                    lblFoot.Text = "✓ 已切换为直连使用，立即生效。";
+                }
+                else if (localProxyMode == "auto")
+                {
+                    lblFoot.Text = "✓ 已切换为自动探测，立即生效。";
+                }
+                else
+                {
+                    lblFoot.Text = "✓ 已应用自定义代理，立即生效。";
+                }
                 if (localProxyMode == "auto")
                 {
                     DetectProxyAsync();
@@ -2124,7 +2248,7 @@ namespace FreebuffController
             {
                 if (localProxyMode == "off")
                 {
-                    stateLabel.Text = "✗ 已停用（off）：额度获取走直连，启动的实例不注入代理。";
+                    stateLabel.Text = "✓ 已设为直连使用（off）：额度获取走直连，启动的实例不注入代理。";
                     stateLabel.ForeColor = ColSub;
                     RefreshPortProbe(false);
                     return;
@@ -3516,7 +3640,7 @@ namespace FreebuffController
             }
             if (changed)
             {
-                SetStatus("代理设置已保存并立即生效 ✓", ColGreen);
+                SetStatus("代理设置已生效 ✓", ColGreen);
                 DetectProxyAsync();
                 RefreshProxyStatusAsync();
             }
