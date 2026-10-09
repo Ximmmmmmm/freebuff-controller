@@ -2507,7 +2507,7 @@ namespace FreebuffController
 
         private Label hintLabel;
 
-        private Label proxyLink;
+        private RoundButton proxyLink;
 
         private ToolTip proxyTip;
 
@@ -2858,17 +2858,13 @@ namespace FreebuffController
             hintLabel = new Label();
             hintLabel.AutoSize = false;
             hintLabel.Text = "双击启动 · Alt+0 控制器 · Alt+1~9 切号";
-            hintLabel.Bounds = new Rectangle(20, 14, 256, 26);
+            hintLabel.Bounds = new Rectangle(20, 14, 234, 26);
             hintLabel.TextAlign = ContentAlignment.MiddleLeft;
             hintLabel.Font = new Font("Microsoft YaHei UI", 9f);
             hintLabel.ForeColor = ColSub;
             base.Controls.Add(hintLabel);
-            // 代理状态不占窗口：实时状态与逐端口探测都在「代理设置」对话框里，
-            // 掉线/恢复的提醒走窗口状态栏。proxyLink 只当后台状态文案的落点（不进界面）。
-            proxyLink = new Label();
-            proxyTip = new ToolTip();
 
-            adblockLink = MakePillButton(AdblockLinkText(adblockEnabled), 286, 94, delegate
+            adblockLink = MakePillButton(AdblockLinkText(adblockEnabled), 262, 94, delegate
             {
                 ToggleAdblock();
             });
@@ -2876,22 +2872,24 @@ namespace FreebuffController
             adblockTip.SetToolTip(adblockLink, AdblockTipText);
             RefreshAdblockLink();
 
-            deleteLink = MakePillButton("删除会话", 388, 82, delegate
+            deleteLink = MakePillButton("删除会话", 364, 84, delegate
             {
                 OpenDeleteThreads();
             });
             deleteTip = new ToolTip();
             deleteTip.SetToolTip(deleteLink, "永久删除会话及其全部聊天记录");
 
-            MakePillButton("代理设置", 478, 82, delegate
+            proxyTip = new ToolTip();
+            proxyLink = MakePillButton(ProxyLinkText(), 456, 104, delegate
             {
-                OpenProxySettings();
+                ShowProxyMenu();
             });
+            RefreshProxyLink();
 
             selfLink = new Label();
             selfLink.AutoSize = false;
             selfLink.Text = "控制器有新版本 · 自更新";
-            selfLink.Bounds = new Rectangle(20, 14, 256, 26);
+            selfLink.Bounds = new Rectangle(20, 14, 234, 26);
             selfLink.TextAlign = ContentAlignment.MiddleLeft;
             selfLink.Font = new Font("Microsoft YaHei UI", 9f);
             selfLink.ForeColor = ColNewVersion;
@@ -3631,18 +3629,206 @@ namespace FreebuffController
 
         private void OpenProxySettings()
         {
-            DetectProxyAsync();
-            bool changed;
-            using (ProxySettingsDialog proxySettingsDialog = new ProxySettingsDialog())
+            ShowProxyMenu();
+        }
+
+        private static string ProxyLinkText()
+        {
+            if (localProxyMode == "off")
             {
-                proxySettingsDialog.ShowDialog(this);
-                changed = proxySettingsDialog.Changed;
+                return "🌐 直连模式 ▾";
             }
-            if (changed)
+            if (localProxyMode == "manual")
             {
-                SetStatus("代理设置已生效 ✓", ColGreen);
+                return "⚙ 自定义代理 ▾";
+            }
+            return "⚡ 自动代理 ▾";
+        }
+
+        private void RefreshProxyLink()
+        {
+            if (proxyLink == null)
+            {
+                return;
+            }
+            if (localProxyMode == "off")
+            {
+                proxyLink.Text = "🌐 直连模式 ▾";
+                proxyLink.ForeColor = ColSub;
+                proxyLink.BackColor = ColNeutral;
+                proxyLink.HoverBack = ColNeutralHover;
+                proxyLink.BorderColor = ColLine;
+                if (proxyTip != null)
+                {
+                    proxyTip.SetToolTip(proxyLink, "当前为直连模式（停用代理）。\n点击快速切换。");
+                }
+            }
+            else if (localProxyMode == "manual")
+            {
+                proxyLink.Text = "⚙ 自定义代理 ▾";
+                proxyLink.ForeColor = Color.FromArgb(29, 78, 216);
+                proxyLink.BackColor = Color.FromArgb(239, 246, 255);
+                proxyLink.HoverBack = Color.FromArgb(219, 234, 254);
+                proxyLink.BorderColor = Color.FromArgb(191, 219, 254);
+                if (proxyTip != null)
+                {
+                    proxyTip.SetToolTip(proxyLink, "自定义代理地址：" + (manualProxyUrl ?? "") + "\n点击快速切换。");
+                }
+            }
+            else
+            {
+                bool hasProxy = !string.IsNullOrEmpty(detectedProxyUrl);
+                proxyLink.Text = hasProxy ? "⚡ 自动代理 ✓ ▾" : "⚡ 自动代理 ▾";
+                proxyLink.ForeColor = Color.FromArgb(16, 149, 103);
+                proxyLink.BackColor = Color.FromArgb(236, 253, 245);
+                proxyLink.HoverBack = Color.FromArgb(209, 250, 229);
+                proxyLink.BorderColor = Color.FromArgb(167, 243, 208);
+                if (proxyTip != null)
+                {
+                    proxyTip.SetToolTip(proxyLink, hasProxy ? ("已探测到可用代理：" + detectedProxyUrl + "\n点击快速切换。") : "自动探测本机常见代理端口。\n点击快速切换。");
+                }
+            }
+            proxyLink.Invalidate();
+        }
+
+        private void ShowProxyMenu()
+        {
+            ContextMenuStrip menu = new ContextMenuStrip();
+            menu.Font = new Font("Microsoft YaHei UI", 9.25f);
+            menu.ShowImageMargin = false;
+
+            ToolStripMenuItem itemDirect = new ToolStripMenuItem((localProxyMode == "off" ? "✓  " : "    ") + "🌐 直连使用（停用代理）");
+            itemDirect.Click += delegate
+            {
+                SwitchProxyMode("off");
+            };
+            menu.Items.Add(itemDirect);
+
+            ToolStripMenuItem itemAuto = new ToolStripMenuItem((localProxyMode == "auto" ? "✓  " : "    ") + "⚡ 自动代理（探测 7890/7897/10808 等）");
+            itemAuto.Click += delegate
+            {
+                SwitchProxyMode("auto");
+            };
+            menu.Items.Add(itemAuto);
+
+            menu.Items.Add(new ToolStripSeparator());
+
+            string customSummary = (localProxyMode == "manual" && !string.IsNullOrEmpty(manualProxyUrl)) ? (" (" + ShortProxyUrl(manualProxyUrl) + ")") : "";
+            ToolStripMenuItem itemManual = new ToolStripMenuItem((localProxyMode == "manual" ? "✓  " : "    ") + "⚙ 自定义代理地址" + customSummary + "…");
+            itemManual.Click += delegate
+            {
+                PromptCustomProxy();
+            };
+            menu.Items.Add(itemManual);
+
+            menu.Show(proxyLink, 0, proxyLink.Height + 2);
+        }
+
+        private void SwitchProxyMode(string mode)
+        {
+            if (mode == "off")
+            {
+                WriteProxyConfig("off");
+            }
+            else
+            {
+                try
+                {
+                    File.Delete(LocalProxyConfigFile);
+                }
+                catch
+                {
+                }
+            }
+            ReloadProxyConfig();
+            RefreshProxyLink();
+            if (localProxyMode == "auto")
+            {
                 DetectProxyAsync();
                 RefreshProxyStatusAsync();
+                SetStatus("已切换为自动代理，立即生效 ✓", ColGreen);
+            }
+            else
+            {
+                SetStatus("已切换为直连使用（停用代理），立即生效 ✓", ColGreen);
+            }
+        }
+
+        private void PromptCustomProxy()
+        {
+            using (Form prompt = new Form())
+            {
+                prompt.Text = "设置自定义代理";
+                prompt.ClientSize = new Size(380, 130);
+                prompt.BackColor = ColPanel;
+                prompt.ForeColor = ColText;
+                prompt.Font = new Font("Microsoft YaHei UI", 9.5f);
+                prompt.FormBorderStyle = FormBorderStyle.FixedDialog;
+                prompt.MaximizeBox = false;
+                prompt.MinimizeBox = false;
+                prompt.ShowInTaskbar = false;
+                prompt.StartPosition = FormStartPosition.CenterParent;
+
+                Label lbl = new Label
+                {
+                    AutoSize = false,
+                    Text = "请输入代理地址（输入即生效）：",
+                    Bounds = new Rectangle(16, 14, 348, 22),
+                    ForeColor = ColSub
+                };
+                prompt.Controls.Add(lbl);
+
+                TextBox box = new TextBox
+                {
+                    Bounds = new Rectangle(16, 42, 348, 25),
+                    Text = (manualProxyUrl ?? "http://127.0.0.1:10808")
+                };
+                prompt.Controls.Add(box);
+
+                RoundButton btnOk = new RoundButton
+                {
+                    Text = "应用",
+                    Bounds = new Rectangle(180, 82, 88, 32),
+                    BackColor = ColAccent,
+                    HoverBack = ColAccentHover,
+                    ForeColor = Color.White,
+                    Cursor = Cursors.Hand
+                };
+                btnOk.Click += delegate
+                {
+                    string text = box.Text.Trim();
+                    Uri res;
+                    if (!Uri.TryCreate(text, UriKind.Absolute, out res))
+                    {
+                        MessageBox.Show(prompt, "请输入有效的完整地址，例如 http://127.0.0.1:10808", "代理设置", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                        return;
+                    }
+                    WriteProxyConfig(text);
+                    ReloadProxyConfig();
+                    RefreshProxyLink();
+                    SetStatus("已启用自定义代理：" + text + " ✓", ColGreen);
+                    prompt.DialogResult = DialogResult.OK;
+                    prompt.Close();
+                };
+                prompt.Controls.Add(btnOk);
+
+                RoundButton btnCancel = new RoundButton
+                {
+                    Text = "取消",
+                    Bounds = new Rectangle(276, 82, 88, 32),
+                    BackColor = ColNeutral,
+                    HoverBack = ColNeutralHover,
+                    ForeColor = ColText,
+                    BorderColor = ColLine,
+                    Cursor = Cursors.Hand,
+                    DialogResult = DialogResult.Cancel
+                };
+                prompt.Controls.Add(btnCancel);
+                prompt.AcceptButton = btnOk;
+                prompt.CancelButton = btnCancel;
+
+                ScaleUi(prompt, DpiScale());
+                prompt.ShowDialog(this);
             }
         }
 
@@ -4429,13 +4615,7 @@ namespace FreebuffController
         {
             if (!base.IsDisposed && proxyLink != null)
             {
-                proxyLink.Text = (ok ? ("代理 ✓ " + address) : "代理 ✗ 未连接");
-                proxyColor = (ok ? ColGreen : ColNewVersion);
-                proxyLink.ForeColor = proxyColor;
-                if (proxyTip != null)
-                {
-                    proxyTip.SetToolTip(proxyLink, ok ? ("当前走" + kind + "（" + address + "）。额度获取跟随代理设置：设了代理走代理，没设走直连。\n左键：代理设置") : "没检测到可用代理。额度获取跟随代理设置：没设代理时走直连。\n左键：代理设置");
-                }
+                RefreshProxyLink();
             }
         }
 
