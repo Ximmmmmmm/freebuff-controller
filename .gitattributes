@@ -1,0 +1,6 @@
+# 文本：索引存 LF（git 默认归一），Windows 工作区 CRLF —— 与仓库现状一致
+* text=auto
+
+# 字节敏感 / 二进制：不参与行尾转换
+*.ico -text
+*.patch -text

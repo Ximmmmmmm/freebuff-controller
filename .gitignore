@@ -10,3 +10,7 @@ sha512.txt
 
 # backup artifacts
 *.bak
+
+# local build/runtime leftovers
+*.pre-*
+local-patches.status.txt
