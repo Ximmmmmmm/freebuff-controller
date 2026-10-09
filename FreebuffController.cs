@@ -2999,6 +2999,48 @@ namespace FreebuffController
             });
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FLASHWINFO
+        {
+            public uint cbSize;
+            public IntPtr hwnd;
+            public uint dwFlags;
+            public uint uCount;
+            public uint dwTimeout;
+        }
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
+
+        // 橙色（警告级）提醒在窗口不在前台时让任务栏按钮闪三下——托盘气泡退场后
+        // 补上「最小化时看不到状态行」的缺口；窗口就在眼前（含它打开着的对话框）时不闪。
+        private void FlashAttention()
+        {
+            try
+            {
+                if (base.IsDisposed || !base.IsHandleCreated)
+                {
+                    return;
+                }
+                Form active = Form.ActiveForm;
+                if (Visible && active != null && (active == this || active.Owner == this))
+                {
+                    return;
+                }
+                FLASHWINFO flash = new FLASHWINFO();
+                flash.cbSize = (uint)Marshal.SizeOf(typeof(FLASHWINFO));
+                flash.hwnd = base.Handle;
+                flash.dwFlags = 3u;   // FLASHW_ALL：标题栏 + 任务栏按钮
+                flash.uCount = 3u;    // 闪三下
+                flash.dwTimeout = 0u; // 用系统默认闪烁频率
+                FlashWindowEx(ref flash);
+            }
+            catch
+            {
+            }
+        }
+
         private void SetStatus(string text, Color? tint = null)
         {
             if (statusLabel == null)
@@ -3010,6 +3052,10 @@ namespace FreebuffController
             statusLabel.Cursor = Cursors.Default;
             bool wasIdle = statusLabel.Text == ReadyStatus();
             Color color = tint ?? ColText;
+            if (tint.HasValue && tint.Value.ToArgb() == ColNewVersion.ToArgb())
+            {
+                FlashAttention();
+            }
             statusLabel.Text = text;
             if (text == ReadyStatus())
             {
