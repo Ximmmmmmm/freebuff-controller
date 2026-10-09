@@ -498,7 +498,9 @@ namespace FreebuffController
         {
             public Color HoverBack = Color.Empty;
 
-            public int Radius = 10;
+            public int Radius = 8;
+
+            public Color BorderColor = Color.Empty;
 
             private bool hovered;
 
@@ -556,12 +558,22 @@ namespace FreebuffController
                         graphics.FillPath(brush, path);
                     }
                 }
+                Color bCol = (BorderColor != Color.Empty) ? BorderColor : ((BackColor == ColNeutral) ? ColLine : Color.Empty);
+                if (bCol != Color.Empty)
+                {
+                    RectangleF rBorder = new RectangleF(0.5f, 0.5f, (float)base.Width - 1f, (float)base.Height - 1f);
+                    using (GraphicsPath pathBorder = Rounded(rBorder, Radius))
+                    using (Pen pen = new Pen(bCol, 1f))
+                    {
+                        graphics.DrawPath(pen, pathBorder);
+                    }
+                }
                 if (Focused && ShowFocusCues)
                 {
                     RectangleF r2 = new RectangleF(3.5f, 3.5f, (float)base.Width - 7f, (float)base.Height - 7f);
                     using (GraphicsPath path2 = Rounded(r2, Math.Max(2, Radius - 3)))
                     {
-                        using (Pen pen = new Pen(Color.FromArgb(150, 24, 27, 33)))
+                        using (Pen pen = new Pen(Color.FromArgb(100, 37, 99, 235), 1.5f))
                         {
                             graphics.DrawPath(pen, path2);
                         }
@@ -2299,33 +2311,33 @@ namespace FreebuffController
 
         private static readonly Regex LooseVersionRegex = new Regex("(\\d+)\\.(\\d+)(?:\\.(\\d+))?(?:\\.(\\d+))?");
 
-        private static readonly Color ColBg = Color.FromArgb(255, 255, 255);
+        private static readonly Color ColBg = Color.FromArgb(248, 250, 252);
 
-        private static readonly Color ColPanel = Color.FromArgb(246, 247, 250);
+        private static readonly Color ColPanel = Color.FromArgb(248, 250, 252);
 
         private static readonly Color ColRow = Color.FromArgb(255, 255, 255);
 
-        private static readonly Color ColLine = Color.FromArgb(230, 233, 238);
+        private static readonly Color ColLine = Color.FromArgb(226, 232, 240);
 
-        private static readonly Color ColText = Color.FromArgb(23, 27, 33);
+        private static readonly Color ColText = Color.FromArgb(15, 23, 42);
 
-        private static readonly Color ColSub = Color.FromArgb(124, 134, 150);
+        private static readonly Color ColSub = Color.FromArgb(100, 116, 139);
 
-        private static readonly Color ColAccent = Color.FromArgb(47, 111, 237);
+        private static readonly Color ColAccent = Color.FromArgb(37, 99, 235);
 
-        private static readonly Color ColAccentHover = Color.FromArgb(71, 130, 245);
+        private static readonly Color ColAccentHover = Color.FromArgb(29, 78, 216);
 
-        private static readonly Color ColNeutral = Color.FromArgb(238, 240, 244);
+        private static readonly Color ColNeutral = Color.FromArgb(241, 245, 249);
 
-        private static readonly Color ColNeutralHover = Color.FromArgb(228, 231, 237);
+        private static readonly Color ColNeutralHover = Color.FromArgb(226, 232, 240);
 
-        private static readonly Color ColGreen = Color.FromArgb(21, 158, 73);
+        private static readonly Color ColGreen = Color.FromArgb(16, 185, 129);
 
-        private static readonly Color ColHeader = Color.FromArgb(246, 247, 249);
+        private static readonly Color ColHeader = Color.FromArgb(248, 250, 252);
 
-        private static readonly Color ColSelect = Color.FromArgb(227, 236, 251);
+        private static readonly Color ColSelect = Color.FromArgb(238, 242, 255);
 
-        private static readonly Color ColHover = Color.FromArgb(240, 245, 252);
+        private static readonly Color ColHover = Color.FromArgb(248, 250, 252);
 
         private DataGridView grid;
 
@@ -2378,11 +2390,11 @@ namespace FreebuffController
         private int proxyStatusBusy;
 
 
-        private Label deleteLink;
+        private RoundButton deleteLink;
 
         private ToolTip deleteTip;
 
-        private Label adblockLink;
+        private RoundButton adblockLink;
 
         private ToolTip adblockTip;
 
@@ -2520,7 +2532,9 @@ namespace FreebuffController
 
         // 窗口头部一律纯白，不吃系统的深色模式：属性 20（DWMWA_USE_IMMERSIVE_DARK_MODE）
         // 置 0 只是「不声明深色」，系统是深色时标题栏照样黑（Win11 26200 实测）；
-        // 所以再显式指定 35（DWMWA_CAPTION_COLOR）纯白 + 36（DWMWA_TEXT_COLOR）近黑。
+        // 窗口头部贴合底色，不吃系统的深色模式：属性 20（DWMWA_USE_IMMERSIVE_DARK_MODE）
+        // 置 0 只是「不声明深色」，系统是深色时标题栏照样黑（Win11 26200 实测）；
+        // 所以再显式指定 35（DWMWA_CAPTION_COLOR）贴底色 + 36（DWMWA_TEXT_COLOR）近黑。
         // Win10 不认 35/36 会静默失败，只吃前一条，同样是浅色标题栏。
         private static void ApplyLightTitleBar(IntPtr hwnd)
         {
@@ -2528,9 +2542,9 @@ namespace FreebuffController
             {
                 int value = 0;
                 DwmSetWindowAttribute(hwnd, 20, ref value, 4);
-                int value2 = 16777215;
+                int value2 = 16579320; // 0x00FCFAF8, matches ColBg (248, 250, 252)
                 DwmSetWindowAttribute(hwnd, 35, ref value2, 4);
-                int value3 = 2169623;
+                int value3 = 2758415; // 0x002A170F, matches ColText (15, 23, 42)
                 DwmSetWindowAttribute(hwnd, 36, ref value3, 4);
             }
             catch
@@ -2580,6 +2594,20 @@ namespace FreebuffController
             base.OnHandleCreated(e);
             ApplyLightTitleBar(base.Handle);
             RegisterGlobalHotkeys();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (grid != null)
+            {
+                using (Pen pen = new Pen(ColLine, 1f))
+                {
+                    e.Graphics.DrawRectangle(pen, grid.Left - 1, grid.Top - 1, grid.Width + 1, grid.Height + 1);
+                    int divY = (statusLabel != null) ? (statusLabel.Top - 7) : 535;
+                    e.Graphics.DrawLine(pen, grid.Left, divY, grid.Right, divY);
+                }
+            }
         }
 
         private void RegisterGlobalHotkeys()
@@ -2713,55 +2741,39 @@ namespace FreebuffController
             hintLabel = new Label();
             hintLabel.AutoSize = false;
             hintLabel.Text = "双击启动 · Alt+0 控制器 · Alt+1~9 切号";
-            hintLabel.Bounds = new Rectangle(20, 14, 280, 20);
+            hintLabel.Bounds = new Rectangle(20, 14, 275, 20);
             hintLabel.ForeColor = ColSub;
             base.Controls.Add(hintLabel);
             // 代理状态不占窗口：实时状态与逐端口探测都在「代理设置」对话框里，
             // 掉线/恢复的提醒走窗口状态栏。proxyLink 只当后台状态文案的落点（不进界面）。
             proxyLink = new Label();
             proxyTip = new ToolTip();
-            deleteLink = MakeLink("删除会话", 406, 72, delegate
+
+            adblockLink = MakePillButton(AdblockLinkText(adblockEnabled), 302, 90, delegate
+            {
+                ToggleAdblock();
+            });
+            adblockTip = new ToolTip();
+            adblockTip.SetToolTip(adblockLink, AdblockTipText);
+            RefreshAdblockLink();
+
+            deleteLink = MakePillButton("删除会话", 398, 76, delegate
             {
                 OpenDeleteThreads();
             });
             deleteTip = new ToolTip();
             deleteTip.SetToolTip(deleteLink, "永久删除会话及其全部聊天记录");
-            MakeLink("代理设置", 488, 72, delegate
+
+            MakePillButton("代理设置", 480, 78, delegate
             {
                 OpenProxySettings();
             });
-            // 「隐藏广告」开关（全控制器唯一入口）：开 = 绿 ✓，关 = 灰；
-            // 状态、落地、回执都走 ToggleAdblock 一处逻辑。
-            adblockLink = new Label();
-            adblockLink.AutoSize = false;
-            adblockLink.Bounds = new Rectangle(300, 14, 96, 20);
-            adblockLink.TextAlign = ContentAlignment.MiddleRight;
-            adblockLink.Cursor = Cursors.Hand;
-            adblockLink.Click += delegate
-            {
-                ToggleAdblock();
-            };
-            adblockLink.MouseEnter += delegate
-            {
-                adblockLink.ForeColor = ColAccentHover;
-            };
-            adblockLink.MouseDown += delegate
-            {
-                adblockLink.ForeColor = ColAccentHover;
-            };
-            adblockLink.MouseLeave += delegate
-            {
-                RefreshAdblockLink();
-            };
-            base.Controls.Add(adblockLink);
-            adblockTip = new ToolTip();
-            adblockTip.SetToolTip(adblockLink, AdblockTipText);
-            RefreshAdblockLink();
+
             selfLink = new Label();
             selfLink.AutoSize = false;
             selfLink.Text = "控制器有新版本 · 自更新";
-            selfLink.Bounds = new Rectangle(20, 14, 256, 20);
-            selfLink.TextAlign = ContentAlignment.MiddleRight;
+            selfLink.Bounds = new Rectangle(20, 14, 275, 20);
+            selfLink.TextAlign = ContentAlignment.MiddleLeft;
             selfLink.ForeColor = ColNewVersion;
             selfLink.Cursor = Cursors.Hand;
             selfLink.MouseEnter += delegate
@@ -2783,25 +2795,25 @@ namespace FreebuffController
             };
             base.Controls.Add(selfLink);
             BuildGrid();
-            Button button = MakeButton("启动", 20, 496, 120, ColAccent, ColAccentHover);
+            Button button = MakeButton("▶ 启动", 20, 496, 120, ColAccent, ColAccentHover);
             button.Click += delegate
             {
                 DisableBriefly(button, 3000);
                 OnLaunch();
             };
-            Button button2 = MakeButton("停止", 160, 496, 120, ColNeutral, ColNeutralHover);
+            Button button2 = MakeButton("■ 停止", 160, 496, 120, ColNeutral, ColNeutralHover);
             button2.Click += delegate
             {
                 DisableBriefly(button2, 2500);
                 OnStop();
             };
-            Button button3 = MakeButton("重置账号", 300, 496, 120, ColNeutral, ColNeutralHover);
+            Button button3 = MakeButton("↻ 重置账号", 300, 496, 120, ColNeutral, ColNeutralHover);
             button3.Click += delegate
             {
                 DisableBriefly(button3, 3000);
                 OnReset();
             };
-            Button button4 = MakeButton("停止全部", 440, 496, 120, ColNeutral, ColNeutralHover);
+            Button button4 = MakeButton("⏹ 停止全部", 440, 496, 120, ColNeutral, ColNeutralHover);
             button4.Click += delegate
             {
                 DisableBriefly(button4, 3000);
@@ -3207,8 +3219,8 @@ namespace FreebuffController
             columnHeadersDefaultCellStyle.ForeColor = ColSub;
             columnHeadersDefaultCellStyle.SelectionBackColor = ColHeader;
             columnHeadersDefaultCellStyle.SelectionForeColor = ColSub;
-            columnHeadersDefaultCellStyle.Font = new Font("Microsoft YaHei UI", 9f);
-            columnHeadersDefaultCellStyle.Padding = new Padding(10, 0, 0, 0);
+            columnHeadersDefaultCellStyle.Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold);
+            columnHeadersDefaultCellStyle.Padding = new Padding(12, 0, 0, 0);
             DataGridViewCellStyle defaultCellStyle = grid.DefaultCellStyle;
             defaultCellStyle.BackColor = ColRow;
             defaultCellStyle.ForeColor = ColText;
@@ -3218,6 +3230,15 @@ namespace FreebuffController
             defaultCellStyle.Padding = new Padding(0, 1, 0, 2);
             defaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
             defaultCellStyle.WrapMode = DataGridViewTriState.False;
+            DataGridViewCellStyle altCellStyle = grid.AlternatingRowsDefaultCellStyle;
+            altCellStyle.BackColor = Color.FromArgb(250, 251, 253);
+            altCellStyle.ForeColor = ColText;
+            altCellStyle.SelectionBackColor = ColSelect;
+            altCellStyle.SelectionForeColor = ColText;
+            altCellStyle.Font = new Font("Microsoft YaHei UI", 9.75f);
+            altCellStyle.Padding = new Padding(0, 1, 0, 2);
+            altCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
+            altCellStyle.WrapMode = DataGridViewTriState.False;
             grid.RowTemplate.Height = 40;
             string[] array = new string[4] { "实例", "状态", "账号", "额度" };
             int[] array2 = new int[4] { 13, 14, 40, 33 };
@@ -3345,8 +3366,10 @@ namespace FreebuffController
             RoundButton roundButton = new RoundButton();
             roundButton.Text = text;
             roundButton.Bounds = new Rectangle(x, y, width, 36);
+            roundButton.Radius = 8;
             roundButton.BackColor = back;
             roundButton.HoverBack = hover;
+            roundButton.BorderColor = (back == ColNeutral) ? ColLine : Color.Empty;
             roundButton.ForeColor = BestTextOn(back);
             roundButton.Font = new Font("Microsoft YaHei UI", 9.75f);
             roundButton.Cursor = Cursors.Hand;
@@ -3354,30 +3377,21 @@ namespace FreebuffController
             return roundButton;
         }
 
-        private Label MakeLink(string text, int x, int width, EventHandler onClick)
+        private RoundButton MakePillButton(string text, int x, int width, EventHandler onClick)
         {
-            Label l = new Label();
-            l.AutoSize = false;
-            l.Text = text;
-            l.Bounds = new Rectangle(x, 14, width, 20);
-            l.TextAlign = ContentAlignment.MiddleRight;
-            l.ForeColor = ColAccent;
-            l.Cursor = Cursors.Hand;
-            l.MouseEnter += delegate
-            {
-                l.ForeColor = ColAccentHover;
-            };
-            l.MouseDown += delegate
-            {
-                l.ForeColor = ColAccentHover;
-            };
-            l.MouseLeave += delegate
-            {
-                l.ForeColor = ColAccent;
-            };
-            l.Click += onClick;
-            base.Controls.Add(l);
-            return l;
+            RoundButton roundButton = new RoundButton();
+            roundButton.Text = text;
+            roundButton.Bounds = new Rectangle(x, 12, width, 24);
+            roundButton.Radius = 6;
+            roundButton.BackColor = ColNeutral;
+            roundButton.HoverBack = ColNeutralHover;
+            roundButton.BorderColor = ColLine;
+            roundButton.ForeColor = ColText;
+            roundButton.Font = new Font("Microsoft YaHei UI", 9f);
+            roundButton.Cursor = Cursors.Hand;
+            roundButton.Click += onClick;
+            base.Controls.Add(roundButton);
+            return roundButton;
         }
 
         // 开关（全控制器唯一入口：主窗口顶部链接）：翻转状态 → 写配置 → 立刻落地到装机 → 界面同步 → 状态栏报结果。
@@ -3399,7 +3413,21 @@ namespace FreebuffController
                 return;
             }
             adblockLink.Text = AdblockLinkText(adblockEnabled);
-            adblockLink.ForeColor = (adblockEnabled ? ColGreen : ColSub);
+            if (adblockEnabled)
+            {
+                adblockLink.ForeColor = Color.FromArgb(16, 149, 103);
+                adblockLink.BackColor = Color.FromArgb(236, 253, 245);
+                adblockLink.HoverBack = Color.FromArgb(209, 250, 229);
+                adblockLink.BorderColor = Color.FromArgb(167, 243, 208);
+            }
+            else
+            {
+                adblockLink.ForeColor = ColSub;
+                adblockLink.BackColor = ColNeutral;
+                adblockLink.HoverBack = ColNeutralHover;
+                adblockLink.BorderColor = ColLine;
+            }
+            adblockLink.Invalidate();
         }
 
         // 开关文字抽成纯函数，便于自测打靶（开 ✓、关不戴标记）。
@@ -3533,7 +3561,8 @@ namespace FreebuffController
             RoundButton roundButton = c as RoundButton;
             if (roundButton != null)
             {
-                roundButton.Radius = Math.Max(2, (int)Math.Round(10f * s));
+                float baseR = (roundButton.Height < 30) ? 6f : 8f;
+                roundButton.Radius = Math.Max(2, (int)Math.Round(baseR * s));
             }
             DataGridView dataGridView = c as DataGridView;
             if (dataGridView != null)
@@ -3551,11 +3580,16 @@ namespace FreebuffController
                 {
                     columnHeadersDefaultCellStyle.Font = new Font(columnHeadersDefaultCellStyle.Font.FontFamily, columnHeadersDefaultCellStyle.Font.Size * s, columnHeadersDefaultCellStyle.Font.Style);
                 }
-                columnHeadersDefaultCellStyle.Padding = new Padding((int)Math.Round(10f * s), 0, 0, 0);
+                columnHeadersDefaultCellStyle.Padding = new Padding((int)Math.Round(12f * s), 0, 0, 0);
                 DataGridViewCellStyle defaultCellStyle = dataGridView.DefaultCellStyle;
                 if (defaultCellStyle.Font != null)
                 {
                     defaultCellStyle.Font = new Font(defaultCellStyle.Font.FontFamily, defaultCellStyle.Font.Size * s, defaultCellStyle.Font.Style);
+                }
+                DataGridViewCellStyle altCellStyle = dataGridView.AlternatingRowsDefaultCellStyle;
+                if (altCellStyle != null && altCellStyle.Font != null)
+                {
+                    altCellStyle.Font = new Font(altCellStyle.Font.FontFamily, altCellStyle.Font.Size * s, altCellStyle.Font.Style);
                 }
                 foreach (DataGridViewColumn column in dataGridView.Columns)
                 {
