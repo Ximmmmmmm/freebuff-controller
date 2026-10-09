@@ -28,8 +28,8 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
-[assembly: System.Reflection.AssemblyVersion("1.9.12.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.12.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.14.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.14.0")]
 
 namespace FreebuffController
 {
@@ -196,6 +196,8 @@ namespace FreebuffController
                 Environment.Exit(MainForm.RunSelfTest((args.Length >= 2) ? args[1] : null));
                 return;
             }
+            ServicePointManager.DefaultConnectionLimit = 20;
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
             SetProcessDPIAware();
             bool createdNew;
             SingleMutex = new Mutex(true, "FreebuffMultiOpenController", out createdNew);
@@ -1997,9 +1999,39 @@ namespace FreebuffController
                     Bounds = new Rectangle(16, 52, 428, 18)
                 };
                 base.Controls.Add(value2);
-                urlBox.Bounds = new Rectangle(16, 72, 428, 23);
+                urlBox.Bounds = new Rectangle(16, 72, 230, 24);
                 urlBox.Text = CurrentSettingText();
                 base.Controls.Add(urlBox);
+                RoundButton btnQuickAuto = new RoundButton
+                {
+                    Text = "⚡ 自动探测",
+                    Bounds = new Rectangle(252, 71, 92, 25),
+                    BackColor = ColNeutral,
+                    ForeColor = ColText,
+                    HoverBack = ColNeutralHover,
+                    Cursor = Cursors.Hand,
+                    Font = new Font("Microsoft YaHei UI", 9f)
+                };
+                btnQuickAuto.Click += delegate
+                {
+                    ApplySetting("");
+                };
+                base.Controls.Add(btnQuickAuto);
+                RoundButton btnQuickOff = new RoundButton
+                {
+                    Text = "🌐 设为直连",
+                    Bounds = new Rectangle(350, 71, 92, 25),
+                    BackColor = ColNeutral,
+                    ForeColor = ColText,
+                    HoverBack = ColNeutralHover,
+                    Cursor = Cursors.Hand,
+                    Font = new Font("Microsoft YaHei UI", 9f)
+                };
+                btnQuickOff.Click += delegate
+                {
+                    ApplySetting("off");
+                };
+                base.Controls.Add(btnQuickOff);
                 stateLabel.AutoSize = false;
                 stateLabel.Bounds = new Rectangle(16, 94, 428, 36);
                 base.Controls.Add(stateLabel);
@@ -2522,6 +2554,8 @@ namespace FreebuffController
             {
                 throw new ApplicationException("未找到 Freebuff 桌面版：\n" + FreebuffExe + "\n\n请先安装 Freebuff。");
             }
+            ServicePointManager.DefaultConnectionLimit = 20;
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
             // v1.9.11 修复：启动时必须装载 proxy.txt。此前 ReloadProxyConfig 只在
             // 「保存设置」时被调用，重启后 off 丢失、按默认 auto 又去探端口注入代理。
             ReloadProxyConfig();
@@ -3771,9 +3805,11 @@ namespace FreebuffController
         //     要自己点开才出现的本地 mock 预览工具，其中 creative-export 还是 z-index:9999 的
         //     全屏层，误藏风险大。
         //
-        // 已知副作用：广告卡里的 ad-reward（赚 Freebucks 的外链任务）是广告容器的子元素，父级一藏
-        // 它就跟着没了；赞助提案的 computeGrant 同理。这是「看不到广告」的必然代价，开关默认关就是
-        // 为了让用户自己决定要不要付这个代价。
+        // 奖励卡例外（1.9.13）：带 .ad-with-reward 的广告卡不再整卡隐藏——容器只在「不含奖励」时
+        // 才藏（:not(:has(.ad-with-reward))），卡内广告图文（.ad-advertiser-link）单独隐藏，只留
+        // 「并赚取 Freebucks」的赚取条与外链。代价收窄为：三大全屏形态（插播 / 聚光灯 / 展示位）
+        // 与赞助提案的 computeGrant 仍看不到。:has() 需 Chromium ≥105（现版 Electron 远超此线）。
+        // 开关默认仍是关——行为改动不偷偷生效。
         //
         // CSS 选择器失配是静默的：Freebuff 改版换个类名，拦截就悄悄失效且不报任何错。所以配了
         // AdblockMissingClasses 做存在性自检，缺哪个就在状态栏说出来，不埋哑弹。
@@ -3781,7 +3817,7 @@ namespace FreebuffController
         private static readonly string AdblockConfigFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FreebuffController\\adblock.txt");
 
         // 主窗口顶部链接这一处入口用的说明。
-        private const string AdblockTipText = "往 Freebuff 界面注入一段样式，隐藏广告位（插播、聚光灯、侧边栏广告卡、赞助提案等）。\r\n\r\n只是不显示，广告仍在后台拉取；代价是「并赚取 Freebucks」的广告奖励入口和赞助提案的免费算力也一起看不到。\r\n改动写入装机 ui\\index.html，下次打开 Freebuff 生效。";
+        private const string AdblockTipText = "往 Freebuff 界面注入一段样式，隐藏广告位（插播、聚光灯、侧边栏广告卡、赞助提案等）。\r\n\r\n只是不显示，广告仍在后台拉取；带「并赚取 Freebucks」的广告卡会保留一条赚取入口（广告图文隐藏，只留赚取条），赞助提案的免费算力仍看不到。\r\n改动写入装机 ui\\index.html，下次打开 Freebuff 生效。";
 
         // 与汉化包共用同一个标记 id：万一两边都注入过，后跑的那方会把先跑的那块整块摘掉，
         // 不会叠出两个 style 块。
@@ -3791,28 +3827,43 @@ namespace FreebuffController
 
         private static bool adblockEnabled;
 
-        // 18 条广告顶层容器选择器，逐个对着 0.0.162 装机的 ui bundle 与 CSS 核对过。
+        // 广告顶层容器选择器，逐个对着装机 ui bundle 与 CSS 核对过。
         // 这份清单是单一数据源：既用于生成 CSS，也用于改版后的存在性自检，避免两边各写一套走偏。
+        // 1.9.13 起分三组：
+        //    A 全藏（AdblockSelectors）：没有任何奖励入口的形态，整块藏；
+        //    B 条件藏（AdblockRewardSafeSelectors）：容器里带 .ad-with-reward 奖励卡时放行，
+        //      只藏纯广告——这就是「看不到广告但看得到赚取入口」的落点；
+        //    C 奖励类名（AdblockRevealClasses）：B 组的判据类 + 卡内广告图文的类，一并自检。
         private static readonly string[] AdblockSelectors = new string[]
         {
             ".sponsor-intermission",
             ".spotlight-backdrop",
             ".spotlight-card",
             ".ad-showcase",
-            ".sponsored-ad",
             ".sponsored-proposal",
             ".sponsored-setup-card",
             ".sponsored-connect-account",
             ".generic-setup-invitation",
             ".supabase-setup-invitation",
+            ".msg.sponsored-task"
+        };
+
+        private static readonly string[] AdblockRewardSafeSelectors = new string[]
+        {
+            ".sponsored-ad",
             ".served-billboard",
             ".partner-placement",
             ".partner-placement-composer",
             ".placement-sidebar-card",
             ".placement-ad-chip",
             ".placement-panel-creative",
-            ".placement-panel-content",
-            ".msg.sponsored-task"
+            ".placement-panel-content"
+        };
+
+        private static readonly string[] AdblockRevealClasses = new string[]
+        {
+            ".ad-with-reward",
+            ".ad-advertiser-link"
         };
 
         // 选择器 → 自检用类名：取最后一段，".msg.sponsored-task" → "sponsored-task"。
@@ -3830,17 +3881,46 @@ namespace FreebuffController
             return selector;
         }
 
+        // 条件藏选择器的写法：容器不含奖励卡（.ad-with-reward 本体或后代）才藏。
+        // :has() 需 Chromium ≥105——现版 Electron 远超；万一不支持，这一条整行失效，
+        // 后果只是「纯广告也被放行」，不会把奖励卡一起藏掉（1.9.13 起设计如此）。
+        private static string ConditionalSelector(string selector)
+        {
+            return selector + ":not(.ad-with-reward):not(:has(.ad-with-reward))";
+        }
+
+        // 自检口径 = A + B + C 三组并集，生成 CSS 之外的调用点（自检、状态文案、自测）共用同口径。
+        private static string[] AllAdblockCheckedSelectors()
+        {
+            string[] array = new string[AdblockSelectors.Length + AdblockRewardSafeSelectors.Length + AdblockRevealClasses.Length];
+            AdblockSelectors.CopyTo(array, 0);
+            AdblockRewardSafeSelectors.CopyTo(array, AdblockSelectors.Length);
+            AdblockRevealClasses.CopyTo(array, AdblockSelectors.Length + AdblockRewardSafeSelectors.Length);
+            return array;
+        }
+
         private static string BuildAdblockStyle()
         {
             StringBuilder sb = new StringBuilder();
             sb.Append("    <style id=\"").Append(AdblockStyleId).Append("\">\n");
             sb.Append("      /* 由 Freebuff 多开控制器注入：隐藏 Freebuff 界面里的广告位。\n");
+            sb.Append("         带「并赚取 Freebucks」的奖励卡放行——只留赚取条，广告图文隐藏；\n");
             sb.Append("         在控制器主窗口顶部的「隐藏广告」里可以关掉，关掉后这段样式会被整块摘除。 */\n");
             for (int i = 0; i < AdblockSelectors.Length; i++)
             {
                 sb.Append("      ").Append(AdblockSelectors[i]);
                 sb.Append((i == AdblockSelectors.Length - 1) ? " {\n" : ",\n");
             }
+            sb.Append("        display: none !important;\n");
+            sb.Append("      }\n");
+            for (int j = 0; j < AdblockRewardSafeSelectors.Length; j++)
+            {
+                sb.Append("      ").Append(ConditionalSelector(AdblockRewardSafeSelectors[j]));
+                sb.Append((j == AdblockRewardSafeSelectors.Length - 1) ? " {\n" : ",\n");
+            }
+            sb.Append("        display: none !important;\n");
+            sb.Append("      }\n");
+            sb.Append("      .ad-with-reward .ad-advertiser-link {\n");
             sb.Append("        display: none !important;\n");
             sb.Append("      }\n");
             sb.Append("    </style>\n");
@@ -3900,9 +3980,10 @@ namespace FreebuffController
                     sb.Append(File.ReadAllText(files[i]));
                 }
                 string css = sb.ToString();
-                for (int j = 0; j < AdblockSelectors.Length; j++)
+                string[] checkedSelectors = AllAdblockCheckedSelectors();
+                for (int j = 0; j < checkedSelectors.Length; j++)
                 {
-                    string name = AdblockClassNameOf(AdblockSelectors[j]);
+                    string name = AdblockClassNameOf(checkedSelectors[j]);
                     if (name == null)
                     {
                         continue;
@@ -3981,7 +4062,7 @@ namespace FreebuffController
                 {
                     return "广告拦截已注入 ✓ 但有 " + missing.Count + " 个类名本版未命中（" + string.Join("、", missing.ToArray()) + "）→ 这些位置可能仍显示广告";
                 }
-                return "广告拦截已注入 ✓ " + AdblockSelectors.Length + " 条选择器全部命中，下次打开 Freebuff 生效";
+                return "广告拦截已注入 ✓ " + AllAdblockCheckedSelectors().Length + " 条选择器全部命中，下次打开 Freebuff 生效";
             }
             catch (Exception ex)
             {
@@ -4633,16 +4714,36 @@ namespace FreebuffController
                         string token = ReadTokenFor(slot);
                         ThreadPool.QueueUserWorkItem(delegate
                         {
+                            QuotaInfo prev = quotaInfos[slot];
                             try
                             {
-                                quotaInfos[slot] = FetchQuota(token);
+                                QuotaInfo fresh = FetchQuota(token);
+                                if (fresh != null && fresh.Text == "获取失败" && prev != null && prev.Text != null && prev.Text != "获取失败" && prev.Text != "—" && prev.Text != "…")
+                                {
+                                    fresh.Text = prev.Text;
+                                    fresh.Exhausted = prev.Exhausted;
+                                    fresh.Tip = "本次刷新暂时超时，已保留上次已知额度。\n" + fresh.Tip;
+                                }
+                                quotaInfos[slot] = fresh;
                             }
                             catch
                             {
-                                quotaInfos[slot] = new QuotaInfo
+                                if (prev != null && prev.Text != null && prev.Text != "获取失败" && prev.Text != "—" && prev.Text != "…")
                                 {
-                                    Text = "获取失败"
-                                };
+                                    quotaInfos[slot] = new QuotaInfo
+                                    {
+                                        Text = prev.Text,
+                                        Exhausted = prev.Exhausted,
+                                        Tip = "本次刷新异常，已保留上次已知额度。"
+                                    };
+                                }
+                                else
+                                {
+                                    quotaInfos[slot] = new QuotaInfo
+                                    {
+                                        Text = "获取失败"
+                                    };
+                                }
                             }
                             UiSafe(delegate
                             {
@@ -4880,14 +4981,18 @@ namespace FreebuffController
 
         private static QuotaInfo TryFetchQuota(string token, string proxyCandidate)
         {
-            try
+            int maxAttempts = 2;
+            for (int attempt = 0; attempt < maxAttempts; attempt++)
             {
-                ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-                HttpWebRequest httpWebRequest = (HttpWebRequest)WebRequest.Create("https://www.codebuff.com/api/v1/freebuff/session");
-                ApplyProxy(httpWebRequest, proxyCandidate);
-                httpWebRequest.Method = "GET";
-                httpWebRequest.Timeout = 30000;
-                httpWebRequest.ReadWriteTimeout = 30000;
+                try
+                {
+                    ServicePointManager.DefaultConnectionLimit = Math.Max(ServicePointManager.DefaultConnectionLimit, 20);
+                    ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+                    HttpWebRequest httpWebRequest = (HttpWebRequest)WebRequest.Create("https://www.codebuff.com/api/v1/freebuff/session");
+                    ApplyProxy(httpWebRequest, proxyCandidate);
+                    httpWebRequest.Method = "GET";
+                    httpWebRequest.Timeout = 20000;
+                    httpWebRequest.ReadWriteTimeout = 20000;
                 httpWebRequest.Headers["Authorization"] = "Bearer " + token;
                 httpWebRequest.Headers["x-freebuff-multi-session"] = "1";
                 httpWebRequest.Headers["x-freebuff-include-unused-rate-limits"] = "1";
@@ -5020,12 +5125,24 @@ namespace FreebuffController
                     quotaInfo8.Text = "登录过期";
                     return quotaInfo8;
                 }
+                if (attempt < maxAttempts - 1)
+                {
+                    Thread.Sleep(300);
+                    continue;
+                }
                 return null;
             }
             catch
             {
+                if (attempt < maxAttempts - 1)
+                {
+                    Thread.Sleep(300);
+                    continue;
+                }
                 return null;
             }
+            }
+            return null;
         }
 
         private static string ReadInstalledVersion()
@@ -8240,13 +8357,14 @@ namespace FreebuffController
                 File.WriteAllText(abIndex, "<!doctype html>\n<html lang=\"zh-CN\">\n  <head>\n    <title>Freebuff 桌面版</title>\r\n  </head>\n  <body></body>\n</html>\n", new UTF8Encoding(false));
                 string abPristine = File.ReadAllText(abIndex);
                 string abCssPath = Path.Combine(abDir, "assets\\index-fake.css");
-                File.WriteAllText(abCssPath, BuildAdblockFakeCss(AdblockSelectors), new UTF8Encoding(false));
+                File.WriteAllText(abCssPath, BuildAdblockFakeCss(AllAdblockCheckedSelectors()), new UTF8Encoding(false));
                 action("AdblockClassNameOf：组合选择器取最后一段（.msg.sponsored-task → sponsored-task）", AdblockClassNameOf(".msg.sponsored-task") == "sponsored-task", AdblockClassNameOf(".msg.sponsored-task"));
+                action("AdblockClassNameOf：点名单类取自身（.ad-with-reward → ad-with-reward）", AdblockClassNameOf(".ad-with-reward") == "ad-with-reward", AdblockClassNameOf(".ad-with-reward"));
                 action("AdblockMissingClasses：类名全在 = 一个都不缺", AdblockMissingClasses(abDir).Count == 0, string.Join(",", AdblockMissingClasses(abDir).ToArray()));
                 // 前缀类名必须分开算：只剩 -composer 时不能把 partner-placement 判成「还在」
                 File.WriteAllText(abCssPath, ".partner-placement-composer{display:block}", new UTF8Encoding(false));
                 action("AdblockMissingClasses：前缀类名不被更长的同前缀类名顶替（partner-placement 应报缺）", AdblockMissingClasses(abDir).Contains("partner-placement"), string.Join(",", AdblockMissingClasses(abDir).ToArray()));
-                File.WriteAllText(abCssPath, BuildAdblockFakeCss(AdblockSelectors), new UTF8Encoding(false));
+                File.WriteAllText(abCssPath, BuildAdblockFakeCss(AllAdblockCheckedSelectors()), new UTF8Encoding(false));
                 string abOnce = ApplyAdblockToHtml(abPristine, true);
                 string abTwice = ApplyAdblockToHtml(abOnce, true);
                 action("ApplyAdblockToHtml：注入后带 style 块", abOnce.Contains("<style id=\"" + AdblockStyleId + "\">"), "");
@@ -8261,12 +8379,21 @@ namespace FreebuffController
                         abHits++;
                     }
                 }
-                action("ApplyAdblockToHtml：" + AdblockSelectors.Length + " 条选择器全部写进了 CSS", abHits == AdblockSelectors.Length, abHits + "/" + AdblockSelectors.Length);
+                for (int abJ = 0; abJ < AdblockRewardSafeSelectors.Length; abJ++)
+                {
+                    if (abOnce.IndexOf("      " + ConditionalSelector(AdblockRewardSafeSelectors[abJ]), StringComparison.Ordinal) >= 0)
+                    {
+                        abHits++;
+                    }
+                }
+                int abExpected = AdblockSelectors.Length + AdblockRewardSafeSelectors.Length;
+                action("ApplyAdblockToHtml：" + abExpected + " 条选择器（全藏 + 条件藏）全部写进了 CSS", abHits == abExpected, abHits + "/" + abExpected);
+                action("ApplyAdblockToHtml：奖励卡例外规则在位（条件藏 + 图文隐藏）", abOnce.IndexOf(":not(:has(.ad-with-reward))", StringComparison.Ordinal) >= 0 && abOnce.IndexOf(".ad-with-reward .ad-advertiser-link", StringComparison.Ordinal) >= 0, "");
                 action("ApplyAdblockToHtml：关闭后整块摘除，逐字节回到原始", ApplyAdblockToHtml(abOnce, false) == abPristine, "");
                 action("ApplyAdblockToHtml：没有 </head> 时原样返回（绝不做半截注入）", ApplyAdblockToHtml("<html><body>x</body></html>", true) == "<html><body>x</body></html>", "");
                 action("ApplyAdblockToHtml：null 进 null 出（不抛）", ApplyAdblockToHtml(null, true) == null, "");
                 File.WriteAllText(abCssPath, ".sponsor-intermission{display:block}", new UTF8Encoding(false));
-                action("AdblockMissingClasses：类名缺失时必须报出来（不许静默失效）", AdblockMissingClasses(abDir).Count == AdblockSelectors.Length - 1, "缺 " + AdblockMissingClasses(abDir).Count + " 个");
+                action("AdblockMissingClasses：类名缺失时必须报出来（不许静默失效）", AdblockMissingClasses(abDir).Count == AllAdblockCheckedSelectors().Length - 1, "缺 " + AdblockMissingClasses(abDir).Count + " 个");
                 action("AdblockMissingClasses：assets 目录不在时不报假警（按无法判断算）", AdblockMissingClasses(Path.Combine(text, "no-such-dir")).Count == 0, "");
                 ApplyAdblockConfigText(null);
                 action("ApplyAdblockConfigText：没有配置文件 = 关（新能力不偷偷生效）", !adblockEnabled, "");
@@ -8278,7 +8405,7 @@ namespace FreebuffController
                 action("ApplyAdblockConfigText：onn 这种脏值 = 关", !adblockEnabled, "");
                 action("AdblockLinkText：开=「隐藏广告 ✓」、关=「隐藏广告」", AdblockLinkText(true) == "隐藏广告 ✓" && AdblockLinkText(false) == "隐藏广告", AdblockLinkText(true));
                 ApplyAdblockConfigText(null);
-                File.WriteAllText(abCssPath, BuildAdblockFakeCss(AdblockSelectors), new UTF8Encoding(false));
+                File.WriteAllText(abCssPath, BuildAdblockFakeCss(AllAdblockCheckedSelectors()), new UTF8Encoding(false));
                 string abNote = ApplyAdblockToFile(abIndex, abDir, true);
                 action("ApplyAdblockToFile：注入真的落盘了", File.ReadAllText(abIndex).Contains("<style id=\"" + AdblockStyleId + "\">"), "");
                 action("ApplyAdblockToFile：全命中时状态文案不带「未命中」", abNote != null && abNote.IndexOf("未命中") < 0, abNote);
