@@ -2011,13 +2011,13 @@ namespace FreebuffController
                     Bounds = new Rectangle(16, 52, 428, 18)
                 };
                 base.Controls.Add(value2);
-                urlBox.Bounds = new Rectangle(16, 72, 230, 24);
+                urlBox.Bounds = new Rectangle(16, 72, 228, 25);
                 urlBox.Text = CurrentSettingText();
                 base.Controls.Add(urlBox);
                 RoundButton btnQuickAuto = new RoundButton
                 {
                     Text = "⚡ 自动探测",
-                    Bounds = new Rectangle(252, 71, 92, 25),
+                    Bounds = new Rectangle(252, 72, 92, 25),
                     BackColor = ColNeutral,
                     ForeColor = ColText,
                     HoverBack = ColNeutralHover,
@@ -2032,7 +2032,7 @@ namespace FreebuffController
                 RoundButton btnQuickOff = new RoundButton
                 {
                     Text = "🌐 设为直连",
-                    Bounds = new Rectangle(350, 71, 92, 25),
+                    Bounds = new Rectangle(352, 72, 92, 25),
                     BackColor = ColNeutral,
                     ForeColor = ColText,
                     HoverBack = ColNeutralHover,
@@ -2045,26 +2045,26 @@ namespace FreebuffController
                 };
                 base.Controls.Add(btnQuickOff);
                 stateLabel.AutoSize = false;
-                stateLabel.Bounds = new Rectangle(16, 94, 428, 36);
+                stateLabel.Bounds = new Rectangle(16, 102, 428, 34);
                 base.Controls.Add(stateLabel);
                 portProbeLabel.AutoSize = false;
-                portProbeLabel.Bounds = new Rectangle(16, 142, 428, 18);
+                portProbeLabel.Bounds = new Rectangle(16, 140, 428, 18);
                 portProbeLabel.ForeColor = ColSub;
                 base.Controls.Add(portProbeLabel);
                 Label value3 = new Label
                 {
                     AutoSize = false,
                     Text = "保存后立即生效：控制器网络请求与之后启动的实例都使用新值。",
-                    Bounds = new Rectangle(16, 164, 428, 18),
+                    Bounds = new Rectangle(16, 162, 428, 18),
                     ForeColor = ColSub
                 };
                 base.Controls.Add(value3);
-                Button button3 = MakeButton("保存", 236, ColAccent, ColAccentHover);
+                Button button3 = MakeButton("保存", 242, ColAccent, ColAccentHover);
                 button3.Click += delegate
                 {
                     ApplySetting(urlBox.Text.Trim());
                 };
-                Button button4 = MakeButton("取消", 346, ColNeutral, ColNeutralHover);
+                Button button4 = MakeButton("取消", 348, ColNeutral, ColNeutralHover);
                 button4.DialogResult = DialogResult.Cancel;
                 base.CancelButton = button4;
                 UpdateState();
@@ -2202,7 +2202,7 @@ namespace FreebuffController
             {
                 RoundButton roundButton = new RoundButton();
                 roundButton.Text = text;
-                roundButton.Bounds = new Rectangle(x, 184, 100, 32);
+                roundButton.Bounds = new Rectangle(x, 186, 96, 32);
                 roundButton.BackColor = back;
                 roundButton.HoverBack = hover;
                 roundButton.ForeColor = BestTextOn(back);
@@ -2338,6 +2338,8 @@ namespace FreebuffController
         private static readonly Color ColSelect = Color.FromArgb(238, 242, 255);
 
         private static readonly Color ColHover = Color.FromArgb(248, 250, 252);
+
+        private Panel cardPanel;
 
         private DataGridView grid;
 
@@ -2599,15 +2601,6 @@ namespace FreebuffController
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            if (grid != null)
-            {
-                using (Pen pen = new Pen(ColLine, 1f))
-                {
-                    e.Graphics.DrawRectangle(pen, grid.Left - 1, grid.Top - 1, grid.Width + 1, grid.Height + 1);
-                    int divY = (statusLabel != null) ? (statusLabel.Top - 7) : 535;
-                    e.Graphics.DrawLine(pen, grid.Left, divY, grid.Right, divY);
-                }
-            }
         }
 
         private void RegisterGlobalHotkeys()
@@ -2721,7 +2714,7 @@ namespace FreebuffController
         private void BuildUi()
         {
             Text = "Freebuff 多开控制器 v" + Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
-            base.ClientSize = new Size(580, 568);
+            base.ClientSize = new Size(580, 588);
             BackColor = ColBg;
             ForeColor = ColText;
             Font = new Font("Microsoft YaHei UI", 9.75f);
@@ -2741,7 +2734,9 @@ namespace FreebuffController
             hintLabel = new Label();
             hintLabel.AutoSize = false;
             hintLabel.Text = "双击启动 · Alt+0 控制器 · Alt+1~9 切号";
-            hintLabel.Bounds = new Rectangle(20, 14, 275, 20);
+            hintLabel.Bounds = new Rectangle(20, 14, 256, 26);
+            hintLabel.TextAlign = ContentAlignment.MiddleLeft;
+            hintLabel.Font = new Font("Microsoft YaHei UI", 9f);
             hintLabel.ForeColor = ColSub;
             base.Controls.Add(hintLabel);
             // 代理状态不占窗口：实时状态与逐端口探测都在「代理设置」对话框里，
@@ -2749,7 +2744,7 @@ namespace FreebuffController
             proxyLink = new Label();
             proxyTip = new ToolTip();
 
-            adblockLink = MakePillButton(AdblockLinkText(adblockEnabled), 302, 90, delegate
+            adblockLink = MakePillButton(AdblockLinkText(adblockEnabled), 286, 94, delegate
             {
                 ToggleAdblock();
             });
@@ -2757,14 +2752,14 @@ namespace FreebuffController
             adblockTip.SetToolTip(adblockLink, AdblockTipText);
             RefreshAdblockLink();
 
-            deleteLink = MakePillButton("删除会话", 398, 76, delegate
+            deleteLink = MakePillButton("删除会话", 388, 82, delegate
             {
                 OpenDeleteThreads();
             });
             deleteTip = new ToolTip();
             deleteTip.SetToolTip(deleteLink, "永久删除会话及其全部聊天记录");
 
-            MakePillButton("代理设置", 480, 78, delegate
+            MakePillButton("代理设置", 478, 82, delegate
             {
                 OpenProxySettings();
             });
@@ -2772,8 +2767,9 @@ namespace FreebuffController
             selfLink = new Label();
             selfLink.AutoSize = false;
             selfLink.Text = "控制器有新版本 · 自更新";
-            selfLink.Bounds = new Rectangle(20, 14, 275, 20);
+            selfLink.Bounds = new Rectangle(20, 14, 256, 26);
             selfLink.TextAlign = ContentAlignment.MiddleLeft;
+            selfLink.Font = new Font("Microsoft YaHei UI", 9f);
             selfLink.ForeColor = ColNewVersion;
             selfLink.Cursor = Cursors.Hand;
             selfLink.MouseEnter += delegate
@@ -2795,25 +2791,25 @@ namespace FreebuffController
             };
             base.Controls.Add(selfLink);
             BuildGrid();
-            Button button = MakeButton("▶ 启动", 20, 496, 120, ColAccent, ColAccentHover);
+            Button button = MakeButton("启动", 20, 506, 123, ColAccent, ColAccentHover);
             button.Click += delegate
             {
                 DisableBriefly(button, 3000);
                 OnLaunch();
             };
-            Button button2 = MakeButton("■ 停止", 160, 496, 120, ColNeutral, ColNeutralHover);
+            Button button2 = MakeButton("停止", 159, 506, 123, ColNeutral, ColNeutralHover);
             button2.Click += delegate
             {
                 DisableBriefly(button2, 2500);
                 OnStop();
             };
-            Button button3 = MakeButton("↻ 重置账号", 300, 496, 120, ColNeutral, ColNeutralHover);
+            Button button3 = MakeButton("重置账号", 298, 506, 123, ColNeutral, ColNeutralHover);
             button3.Click += delegate
             {
                 DisableBriefly(button3, 3000);
                 OnReset();
             };
-            Button button4 = MakeButton("⏹ 停止全部", 440, 496, 120, ColNeutral, ColNeutralHover);
+            Button button4 = MakeButton("停止全部", 437, 506, 123, ColNeutral, ColNeutralHover);
             button4.Click += delegate
             {
                 DisableBriefly(button4, 3000);
@@ -2821,13 +2817,14 @@ namespace FreebuffController
             };
             hanhuaLabel = new Label();
             hanhuaLabel.AutoSize = false;
-            hanhuaLabel.Bounds = new Rectangle(20, 542, 200, 18);
+            hanhuaLabel.Bounds = new Rectangle(20, 554, 200, 20);
             hanhuaLabel.ForeColor = ColSub;
             hanhuaLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
             statusLabel = new Label();
             statusLabel.AutoSize = false;
             statusLabel.Text = ReadyStatus();
-            statusLabel.Bounds = new Rectangle(20, 542, 540, 18);
+            statusLabel.Bounds = new Rectangle(20, 554, 540, 20);
+            statusLabel.TextAlign = ContentAlignment.MiddleLeft;
             statusLabel.ForeColor = ColText;
             statusLabel.Font = new Font("Microsoft YaHei UI", 9f);
             statusLabel.AutoEllipsis = true;
@@ -3178,6 +3175,12 @@ namespace FreebuffController
 
         private void BuildGrid()
         {
+            cardPanel = new Panel();
+            cardPanel.Location = new Point(20, 50);
+            cardPanel.Size = new Size(540, 440);
+            cardPanel.BackColor = ColLine;
+            base.Controls.Add(cardPanel);
+
             grid = new DataGridView();
             // DataGridView.DoubleBuffered 是 protected，只能反射打开。实测这台机器上
             // 10 行的全量重绘要 17ms（占整窗重绘的 66%），不开缓冲时每 3 秒的单元格
@@ -3193,8 +3196,8 @@ namespace FreebuffController
             catch
             {
             }
-            grid.Location = new Point(20, 44);
-            grid.Size = new Size(540, 444);
+            grid.Location = new Point(1, 1);
+            grid.Size = new Size(538, 438);
             grid.ScrollBars = ScrollBars.None;
             grid.ReadOnly = true;
             grid.AllowUserToAddRows = false;
@@ -3226,8 +3229,8 @@ namespace FreebuffController
             defaultCellStyle.ForeColor = ColText;
             defaultCellStyle.SelectionBackColor = ColSelect;
             defaultCellStyle.SelectionForeColor = ColText;
-            defaultCellStyle.Font = new Font("Microsoft YaHei UI", 9.75f);
-            defaultCellStyle.Padding = new Padding(0, 1, 0, 2);
+            defaultCellStyle.Font = new Font("Microsoft YaHei UI", 9.5f);
+            defaultCellStyle.Padding = new Padding(12, 0, 0, 0);
             defaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
             defaultCellStyle.WrapMode = DataGridViewTriState.False;
             DataGridViewCellStyle altCellStyle = grid.AlternatingRowsDefaultCellStyle;
@@ -3235,23 +3238,23 @@ namespace FreebuffController
             altCellStyle.ForeColor = ColText;
             altCellStyle.SelectionBackColor = ColSelect;
             altCellStyle.SelectionForeColor = ColText;
-            altCellStyle.Font = new Font("Microsoft YaHei UI", 9.75f);
-            altCellStyle.Padding = new Padding(0, 1, 0, 2);
+            altCellStyle.Font = new Font("Microsoft YaHei UI", 9.5f);
+            altCellStyle.Padding = new Padding(12, 0, 0, 0);
             altCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
             altCellStyle.WrapMode = DataGridViewTriState.False;
             grid.RowTemplate.Height = 40;
             string[] array = new string[4] { "实例", "状态", "账号", "额度" };
-            int[] array2 = new int[4] { 13, 14, 40, 33 };
+            int[] array2 = new int[4] { 14, 16, 38, 32 };
             for (int i = 0; i < array.Length; i++)
             {
                 int index = grid.Columns.Add("c" + i, array[i]);
                 grid.Columns[index].FillWeight = array2[i];
                 grid.Columns[index].SortMode = DataGridViewColumnSortMode.NotSortable;
-                grid.Columns[index].DefaultCellStyle.Padding = new Padding(12, 1, 0, 2);
+                grid.Columns[index].DefaultCellStyle.Padding = new Padding(12, 0, 0, 0);
             }
             try
             {
-                grid.Columns[3].MinimumWidth = 170;
+                grid.Columns[3].MinimumWidth = 160;
             }
             catch
             {
@@ -3260,10 +3263,6 @@ namespace FreebuffController
             {
                 string text = ((j == 0) ? "主实例" : ("实例 " + j));
                 grid.Rows.Add(text, "…", "…", "…");
-            }
-            for (int k = 0; k < grid.Columns.Count; k++)
-            {
-                grid.Rows[9].Cells[k].Style.Padding = new Padding(12, 1, 0, 10);
             }
             grid.ClearSelection();
             grid.CurrentCell = null;
@@ -3288,7 +3287,7 @@ namespace FreebuffController
                     grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = Color.Empty;
                 }
             };
-            base.Controls.Add(grid);
+            cardPanel.Controls.Add(grid);
         }
 
         // 白底下按钮文字按底色明度选深浅：浅底用正文近黑，深/彩底用白。
@@ -3381,7 +3380,7 @@ namespace FreebuffController
         {
             RoundButton roundButton = new RoundButton();
             roundButton.Text = text;
-            roundButton.Bounds = new Rectangle(x, 12, width, 24);
+            roundButton.Bounds = new Rectangle(x, 14, width, 26);
             roundButton.Radius = 6;
             roundButton.BackColor = ColNeutral;
             roundButton.HoverBack = ColNeutralHover;
@@ -3593,9 +3592,17 @@ namespace FreebuffController
                 }
                 foreach (DataGridViewColumn column in dataGridView.Columns)
                 {
-                    column.DefaultCellStyle.Padding = new Padding((int)Math.Round(12f * s), (int)Math.Round(1f * s), 0, (int)Math.Round(2f * s));
+                    column.DefaultCellStyle.Padding = new Padding((int)Math.Round(12f * s), 0, 0, 0);
                 }
-                dataGridView.Height = num + num2 * dataGridView.Rows.Count + (int)Math.Round(6f * s);
+                if (dataGridView.Parent != null && !(dataGridView.Parent is Form))
+                {
+                    dataGridView.Location = new Point(1, 1);
+                    dataGridView.Size = new Size(dataGridView.Parent.ClientSize.Width - 2, dataGridView.Parent.ClientSize.Height - 2);
+                }
+                else if (dataGridView.ScrollBars == ScrollBars.None)
+                {
+                    dataGridView.Height = num + num2 * dataGridView.Rows.Count;
+                }
             }
             foreach (Control control in c.Controls)
             {
