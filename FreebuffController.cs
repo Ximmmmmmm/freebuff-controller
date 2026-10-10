@@ -28,8 +28,8 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
-[assembly: System.Reflection.AssemblyVersion("1.9.14.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.14.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.15.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.15.0")]
 
 namespace FreebuffController
 {
@@ -2187,9 +2187,9 @@ namespace FreebuffController
                 else
                 {
                     Uri result;
-                    if (!Uri.TryCreate(val, UriKind.Absolute, out result))
+                    if (!TryParseProxyAddress(val, out result))
                     {
-                        MessageBox.Show(this, "请输入有效的完整地址，例如 http://127.0.0.1:10808", "代理设置", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                        MessageBox.Show(this, ProxyAddressFormatHelp, "代理设置", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
                         return;
                     }
                     ApplySetting(val);
@@ -2198,33 +2198,54 @@ namespace FreebuffController
 
             private void ApplySetting(string value)
             {
-                if (string.IsNullOrEmpty(value))
+                try
                 {
-                    try
+                    if (string.IsNullOrEmpty(value))
                     {
-                        File.Delete(LocalProxyConfigFile);
+                        if (File.Exists(LocalProxyConfigFile))
+                        {
+                            File.Delete(LocalProxyConfigFile);
+                        }
                     }
-                    catch
+                    else if (value.Equals("off", StringComparison.OrdinalIgnoreCase))
                     {
+                        WriteProxyConfig("off");
+                    }
+                    else
+                    {
+                        Uri result;
+                        if (!TryParseProxyAddress(value, out result))
+                        {
+                            MessageBox.Show(this, ProxyAddressFormatHelp, "代理设置", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                            return;
+                        }
+                        WriteProxyConfig(value);
                     }
                 }
-                else if (value.Equals("off", StringComparison.OrdinalIgnoreCase))
+                catch (Exception ex)
                 {
-                    WriteProxyConfig("off");
-                }
-                else
-                {
-                    Uri result;
-                    if (!Uri.TryCreate(value, UriKind.Absolute, out result))
-                    {
-                        MessageBox.Show(this, "不是有效的地址，例如 http://127.0.0.1:10808", "代理设置", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
-                        return;
-                    }
-                    WriteProxyConfig(value);
+                    ReloadProxyConfig();
+                    RefreshModeButtons();
+                    UpdateState();
+                    lblFoot.ForeColor = ColNewVersion;
+                    lblFoot.Text = "设置失败：" + ex.Message;
+                    return;
                 }
                 ReloadProxyConfig();
+                if ((string.IsNullOrEmpty(value) && localProxyMode != "auto")
+                    || (string.Equals(value, "off", StringComparison.OrdinalIgnoreCase) && localProxyMode != "off")
+                    || (!string.IsNullOrEmpty(value) && !string.Equals(value, "off", StringComparison.OrdinalIgnoreCase)
+                        && (localProxyMode != "manual" || manualProxyUrl != value)))
+                {
+                    RefreshModeButtons();
+                    UpdateState();
+                    lblFoot.ForeColor = ColNewVersion;
+                    lblFoot.Text = "设置未能生效，请检查配置文件权限。";
+                    return;
+                }
                 Changed = true;
                 RefreshModeButtons();
+                lblFoot.ForeColor = ColGreen;
                 if (localProxyMode == "off")
                 {
                     lblFoot.Text = "✓ 已切换为直连使用，立即生效。";
@@ -2382,6 +2403,8 @@ namespace FreebuffController
         private const double HanhuaRetrySeconds = 10.0;
 
         private const string DefaultLocalProxyUrl = "http://127.0.0.1:10808";
+
+        private const string ProxyAddressFormatHelp = "请输入 HTTP 代理（http://主机:端口；省略端口时默认 80），或 SOCKS4/5 代理（socks4://主机:端口 / socks5://主机:端口）。不支持账号密码、路径和查询参数。";
 
         private const string Probe204Url = "http://connect.rom.miui.com/generate_204";
 
@@ -3726,21 +3749,38 @@ namespace FreebuffController
 
         private void SwitchProxyMode(string mode)
         {
-            if (mode == "off")
+            if (mode != "off" && mode != "auto")
             {
-                WriteProxyConfig("off");
+                return;
             }
-            else
+
+            try
             {
-                try
+                if (mode == "off")
+                {
+                    WriteProxyConfig("off");
+                }
+                else if (File.Exists(LocalProxyConfigFile))
                 {
                     File.Delete(LocalProxyConfigFile);
                 }
-                catch
-                {
-                }
             }
+            catch (Exception ex)
+            {
+                LogFail("切换代理模式失败", ex);
+                ReloadProxyConfig();
+                RefreshProxyLink();
+                SetStatus("代理模式切换失败：" + ex.Message, ColNewVersion);
+                return;
+            }
+
             ReloadProxyConfig();
+            if (localProxyMode != mode)
+            {
+                RefreshProxyLink();
+                SetStatus("代理设置未能生效，请检查配置文件权限。", ColNewVersion);
+                return;
+            }
             RefreshProxyLink();
             if (localProxyMode == "auto")
             {
@@ -3798,13 +3838,29 @@ namespace FreebuffController
                 {
                     string text = box.Text.Trim();
                     Uri res;
-                    if (!Uri.TryCreate(text, UriKind.Absolute, out res))
+                    if (!TryParseProxyAddress(text, out res))
                     {
-                        MessageBox.Show(prompt, "请输入有效的完整地址，例如 http://127.0.0.1:10808", "代理设置", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                        MessageBox.Show(prompt, ProxyAddressFormatHelp, "代理设置", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
                         return;
                     }
-                    WriteProxyConfig(text);
+                    try
+                    {
+                        WriteProxyConfig(text);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogFail("保存自定义代理失败", ex);
+                        MessageBox.Show(prompt, "保存代理设置失败：" + ex.Message, "代理设置", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                        return;
+                    }
                     ReloadProxyConfig();
+                    if (localProxyMode != "manual" || manualProxyUrl != text)
+                    {
+                        RefreshProxyLink();
+                        SetStatus("代理设置未能生效，请检查配置文件权限。", ColNewVersion);
+                        MessageBox.Show(prompt, "代理设置未能生效，请检查配置文件权限。", "代理设置", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                        return;
+                    }
                     RefreshProxyLink();
                     SetStatus("已启用自定义代理：" + text + " ✓", ColGreen);
                     prompt.DialogResult = DialogResult.OK;
@@ -4090,7 +4146,34 @@ namespace FreebuffController
             ApplyProxyConfigText(text);
         }
 
-        // 解析 proxy.txt 原文并落地：null / 空白 = auto，off = 停用，绝对 URL = manual。
+        private static bool TryParseProxyAddress(string value, out Uri uri)
+        {
+            uri = null;
+            Uri parsed;
+            if (string.IsNullOrEmpty(value) || !Uri.TryCreate(value, UriKind.Absolute, out parsed))
+            {
+                return false;
+            }
+
+            string scheme = parsed.Scheme;
+            bool supportedScheme = scheme.Equals("http", StringComparison.OrdinalIgnoreCase)
+                || scheme.Equals("socks4", StringComparison.OrdinalIgnoreCase)
+                || scheme.Equals("socks5", StringComparison.OrdinalIgnoreCase);
+            if (!supportedScheme || string.IsNullOrEmpty(parsed.Host) || parsed.Port < 1 || parsed.Port > 65535)
+            {
+                return false;
+            }
+            if (!string.IsNullOrEmpty(parsed.UserInfo) || parsed.AbsolutePath != "/"
+                || !string.IsNullOrEmpty(parsed.Query) || !string.IsNullOrEmpty(parsed.Fragment))
+            {
+                return false;
+            }
+
+            uri = parsed;
+            return true;
+        }
+
+        // 解析 proxy.txt 原文并落地：null / 空白 = auto，off = 停用，受支持的代理 URL = manual。
         // 抽成纯函数是为了让自测能直接打靶（见 RunSelfTest「代理配置装载」组）。
         private static void ApplyProxyConfigText(string content)
         {
@@ -4108,7 +4191,7 @@ namespace FreebuffController
                         {
                             text = "off";
                         }
-                        else if (Uri.TryCreate(text3, UriKind.Absolute, out result))
+                        else if (TryParseProxyAddress(text3, out result))
                         {
                             text = "manual";
                             text2 = text3;
@@ -4128,7 +4211,10 @@ namespace FreebuffController
         private static void WriteProxyConfig(string content)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(LocalProxyConfigFile));
-            File.WriteAllText(LocalProxyConfigFile, content);
+            if (!WriteFileAtomic(LocalProxyConfigFile, content))
+            {
+                throw new IOException("无法原子保存代理配置文件。");
+            }
         }
 
         // ==================== 广告拦截（隐藏 Freebuff 界面里的广告位）====================
@@ -8862,7 +8948,7 @@ namespace FreebuffController
                 string lpUiDir = Path.Combine(lpRoot, "orchestrator", "ui", "assets");
                 string lpUi = Path.Combine(lpUiDir, "index-lp.js");
                 Directory.CreateDirectory(lpUiDir);
-                File.WriteAllText(lpUi, "vme=\"freebuff-advanced-mode\";function wut(){try{return localStorage.getItem(vme)===\"true\"}catch{return!1}}\n", new UTF8Encoding(false));
+                File.WriteAllText(lpUi, "vme=\"freebuff-advanced-mode\";function wut(){try{return localStorage.getItem(vme)===\"true\"}catch{return!1}}\n" + LocalPatches.AvgSpeedOuterOld + "\n" + "function l1t({threadId:e}){var x=1}\n", new UTF8Encoding(false));
                 List<LocalPatches.Outcome> lpFirst = LocalPatches.ApplyAll(lpRoot);
                 bool lpUiApplied = false;
                 foreach (LocalPatches.Outcome lp in lpFirst)
@@ -8873,6 +8959,50 @@ namespace FreebuffController
                     }
                 }
                 action("LocalPatches：高级模式默认开启被应用", lpUiApplied && File.ReadAllText(lpUi).IndexOf("!==\"false\"", StringComparison.Ordinal) >= 0, lpUi);
+                action("LocalPatches：平均速度（圆环旁）被插入", File.ReadAllText(lpUi).IndexOf(LocalPatches.AvgSpeedOuterNew, StringComparison.Ordinal) >= 0, lpUi);
+                action("LocalPatches：每秒重渲染注入已生效", File.ReadAllText(lpUi).IndexOf("hanhuaSpdTick", StringComparison.Ordinal) >= 0, lpUi);
+                string lpRoot2 = Path.Combine(text, "lp-res2");
+                string lpUiDir2 = Path.Combine(lpRoot2, "orchestrator", "ui", "assets");
+                string lpUi2 = Path.Combine(lpUiDir2, "index-lp2.js");
+                Directory.CreateDirectory(lpUiDir2);
+                File.WriteAllText(lpUi2, "vme=\"freebuff-advanced-mode\";function wut(){try{return localStorage.getItem(vme)===\"true\"}catch{return!1}}\n" + LocalPatches.AvgSpeedOuterPrev2 + "\n" + LocalPatches.AvgSpeedInnerNew + "\n" + "function l1t({threadId:e}){var x=1}\n", new UTF8Encoding(false));
+                LocalPatches.ApplyAll(lpRoot2);
+                string lp2Text = File.ReadAllText(lpUi2);
+                action("LocalPatches：v2 静态版被撤、实时版就位（迁移）", lp2Text.IndexOf(LocalPatches.AvgSpeedInnerNew, StringComparison.Ordinal) < 0 && lp2Text.IndexOf(LocalPatches.AvgSpeedOuterPrev2, StringComparison.Ordinal) < 0 && lp2Text.IndexOf(LocalPatches.AvgSpeedOuterNew, StringComparison.Ordinal) >= 0 && lp2Text.IndexOf("hanhuaSpdTick", StringComparison.Ordinal) >= 0, lpUi2);
+                string lpRoot3 = Path.Combine(text, "lp-res3");
+                string lpUiDir3 = Path.Combine(lpRoot3, "orchestrator", "ui", "assets");
+                string lpUi3 = Path.Combine(lpUiDir3, "index-lp3.js");
+                Directory.CreateDirectory(lpUiDir3);
+                File.WriteAllText(lpUi3, "vme=\"freebuff-advanced-mode\";function wut(){try{return localStorage.getItem(vme)===\"true\"}catch{return!1}}\n" + LocalPatches.AvgSpeedOuterPrev + "\n" + "function l1t({threadId:e}){var x=1}\n", new UTF8Encoding(false));
+                LocalPatches.ApplyAll(lpRoot3);
+                string lp3Text = File.ReadAllText(lpUi3);
+                action("LocalPatches：v1 长文字版被撤、实时版就位（迁移）", lp3Text.IndexOf(LocalPatches.AvgSpeedOuterPrev, StringComparison.Ordinal) < 0 && lp3Text.IndexOf(LocalPatches.AvgSpeedOuterNew, StringComparison.Ordinal) >= 0 && lp3Text.IndexOf("hanhuaSpdTick", StringComparison.Ordinal) >= 0, lpUi3);
+
+
+                string lpRoot4 = Path.Combine(text, "lp-res4");
+                string lpUiDir4 = Path.Combine(lpRoot4, "orchestrator", "ui", "assets");
+                string lpUi4 = Path.Combine(lpUiDir4, "index-lp4.js");
+                Directory.CreateDirectory(lpUiDir4);
+                File.WriteAllText(lpUi4, "vme=\"freebuff-advanced-mode\";function wut(){try{return localStorage.getItem(vme)===\"true\"}catch{return!1}}\n" + LocalPatches.AvgSpeedOuterPrev3 + "\n" + "function l1t({threadId:e}){var x=1}\n" + "if(r.streamSeq!==void 0&&n<=r.streamSeq)return e;if(t.type===\"finish\"){const a=Z4(r.parts,t,Rh);\n", new UTF8Encoding(false));
+                LocalPatches.ApplyAll(lpRoot4);
+                string lp4Text = File.ReadAllText(lpUi4);
+                action("LocalPatches：v3 实时版被撤、v5 就位（迁移）", lp4Text.IndexOf(LocalPatches.AvgSpeedOuterPrev3, StringComparison.Ordinal) < 0 && lp4Text.IndexOf(LocalPatches.AvgSpeedOuterNew, StringComparison.Ordinal) >= 0 && lp4Text.IndexOf("hanhuaSpdTick", StringComparison.Ordinal) >= 0, lpUi4);
+                action("LocalPatches：运行中用量推送（turn_metrics）接线被应用", lp4Text.IndexOf("t.type===\"turn_metrics\"", StringComparison.Ordinal) >= 0, lpUi4);
+                string lpRoot5 = Path.Combine(text, "lp-res5");
+                string lpOrc5 = Path.Combine(lpRoot5, "orchestrator", "orchestrator.js");
+                Directory.CreateDirectory(Path.Combine(lpRoot5, "orchestrator"));
+                File.WriteAllText(lpOrc5, LocalPatches.OrchestratorEditsFixture(), new UTF8Encoding(false));
+                LocalPatches.ApplyAll(lpRoot5);
+                string lp5Text = File.ReadAllText(lpOrc5);
+                action("LocalPatches：orchestrator 全量补丁可应用（含 turn_metrics 推送）", lp5Text.IndexOf("type: \"turn_metrics\"", StringComparison.Ordinal) >= 0, lpOrc5);
+                string lpRoot6 = Path.Combine(text, "lp-res6");
+                string lpUiDir6 = Path.Combine(lpRoot6, "orchestrator", "ui", "assets");
+                string lpUi6 = Path.Combine(lpUiDir6, "index-lp6.js");
+                Directory.CreateDirectory(lpUiDir6);
+                File.WriteAllText(lpUi6, "vme=\"freebuff-advanced-mode\";function wut(){try{return localStorage.getItem(vme)===\"true\"}catch{return!1}}\n" + LocalPatches.AvgSpeedOuterPrev4 + "\n" + "function l1t({threadId:e}){var x=1}\n", new UTF8Encoding(false));
+                LocalPatches.ApplyAll(lpRoot6);
+                string lp6Text = File.ReadAllText(lpUi6);
+                action("LocalPatches：v4 估算版被撤、v5（DSH 口径）就位（迁移）", lp6Text.IndexOf(LocalPatches.AvgSpeedOuterPrev4, StringComparison.Ordinal) < 0 && lp6Text.IndexOf(LocalPatches.AvgSpeedOuterNew, StringComparison.Ordinal) >= 0 && lp6Text.IndexOf("hanhuaSpdTick", StringComparison.Ordinal) >= 0, lpUi6);
                 List<LocalPatches.Outcome> lpSecond = LocalPatches.ApplyAll(lpRoot);
                 bool lpIdempotent = true;
                 foreach (LocalPatches.Outcome lp in lpSecond)
@@ -9679,13 +9809,17 @@ namespace FreebuffController
     // ═══════════════════════════════════════════════════════════════════════
     // 本机补丁（LocalPatches）—— 不进汉化包、不出现在控制器界面上
     //
-    // 只改本机装机文件，把两件已经在用的本机改动固定下来：
+    // 只改本机装机文件，把三件已经在用的本机改动固定下来：
     //   · resources\orchestrator\orchestrator.js
     //       压缩预算改用服务端目录下发的真实窗口（按 key / handle / 编译 id 登记），
     //       预算 = 窗口 − 40960，阈值 = 0.9 × 预算；空闲（缓存过期）压缩门槛从
     //       14 万（DeepSeek 的 4 万）统一抬到 90 万。
     //   · resources\orchestrator\ui\assets\index-*.js
     //       高级模式默认开启：读取逻辑 getItem(...) === "true" 改为 !== "false"。
+    //       输入框一行（上下文圆环按钮旁）显示「N t/s」：输出令牌合计 ÷ 各轮耗时合计
+    //       （DSH 口径：Σ输出令牌 ÷ Σ纯生成耗时——自首个输出块到该响应最后一块，不含工具
+    //       执行/预填/排队；参考 DeepSeek Harness 的 decode TPS）。orchestrator.js 在 emit
+    //       头部记录解码窗口、onMetrics 处随 turn_metrics 事件同步；历版自动撤除迁移。
     //
     // 时机：控制器启动、启动实例前、汉化恢复完成之后各跑一次。静默执行——正常结果
     // 只写 <控制器目录>\local-patches.status.txt；锚点未命中或写盘失败才写
@@ -9822,9 +9956,46 @@ namespace FreebuffController
                       "          FREEBUFF_WINDOW_BY_MODEL[id2] = row.contextWindow;",
                       "      }",
                       "    }")),
+                new Edit("运行中用量推送（v1→v2：解码耗时 + 窗口收口）",
+                    L("      onMetrics: (metrics) => {",
+                      "        live.metrics = mergeTurnMetrics(live.metrics, metrics);",
+                      "        emit({ type: \"turn_metrics\", metrics: live.metrics });",
+                      "      },"),
+                    L("      onMetrics: (metrics) => {",
+                      "        live.metrics = mergeTurnMetrics(live.metrics, metrics);",
+                      "        try { const hhSt = live.hanhuaDecode; if (hhSt && hhSt.start) { if (hhSt.last > hhSt.start) hhSt.ms += hhSt.last - hhSt.start; hhSt.start = 0; } live.metrics.fbDecodeMs = hhSt ? hhSt.ms : 0; } catch (e) {}",
+                      "        emit({ type: \"turn_metrics\", metrics: live.metrics });",
+                      "      },"), true),
+                new Edit("运行中用量推送（原始版→v2：解码耗时 + 窗口收口）",
+                    L("      onMetrics: (metrics) => {",
+                      "        live.metrics = mergeTurnMetrics(live.metrics, metrics);",
+                      "      },"),
+                    L("      onMetrics: (metrics) => {",
+                      "        live.metrics = mergeTurnMetrics(live.metrics, metrics);",
+                      "        try { const hhSt = live.hanhuaDecode; if (hhSt && hhSt.start) { if (hhSt.last > hhSt.start) hhSt.ms += hhSt.last - hhSt.start; hhSt.start = 0; } live.metrics.fbDecodeMs = hhSt ? hhSt.ms : 0; } catch (e) {}",
+                      "        emit({ type: \"turn_metrics\", metrics: live.metrics });",
+                      "      },"), true),
+                new Edit("解码计时器：emit 头部记录纯生成窗口（DSH 口径配套）",
+                    L("emit = (ev2) => {",
+                      "    if (live.parts = foldAgentEvent(live.parts, ev2, newId)"),
+                    L("emit = (ev2) => {",
+                      "    try { const hhTy = ev2 && ev2.type, hhSt = live.hanhuaDecode || (live.hanhuaDecode = { start: 0, last: 0, ms: 0 }); if (hhTy === \"text\" || hhTy === \"reasoning_delta\" || hhTy === \"tool_call\") { const hhN = Date.now(); if (!hhSt.start) hhSt.start = hhN; hhSt.last = hhN; } else if (hhSt.start) { if (hhTy === \"response_reset\") hhSt.start = 0; else { if (hhSt.last > hhSt.start) hhSt.ms += hhSt.last - hhSt.start; hhSt.start = 0; } } } catch (e) {}",
+                      "    if (live.parts = foldAgentEvent(live.parts, ev2, newId)")),
             };
         }
 
+        /// <summary>
+        /// 自测用：把全部编排器改动的「改动前原文」拼成一个最小合成文件（每段恰好命中一次）。
+        /// </summary>
+        internal static string OrchestratorEditsFixture()
+        {
+            List<string> parts = new List<string>();
+            foreach (Edit edit in OrchestratorEdits())
+            {
+                parts.Add(edit.Old);
+            }
+            return string.Join("\n", parts) + "\n";
+        }
         /// <summary>
         /// 打完补丁后结果里必须出现的标记；少一个就说明这版上游改了写法，宁可整文件不写。
         /// </summary>
@@ -9838,6 +10009,9 @@ namespace FreebuffController
                 "policy2",
                 "Math.max(policy.maxContextLength ?? 0",
                 "Math.max(catalog?.compaction?.maxContextLength ?? 0",
+                "type: \"turn_metrics\"",
+                "hanhuaDecode",
+                "fbDecodeMs",
             };
         }
 
@@ -9980,6 +10154,210 @@ namespace FreebuffController
             return outcome;
         }
 
+        // 「平均速度」补丁的锚点（自测 fixture 直接引用，避免同一串多处转义）。
+        // Inner=弹窗内首版（已废弃）；OuterPrev…Prev4=圆环旁历版（长文字/静态/仅时间戳版/字节估算版）——仅用于撤除迁移。
+        // Outer=圆环旁现行版「N t/s」（DSH 口径：Σ输出令牌 ÷ Σ纯生成耗时；emit 计时 + turn_metrics 接线）。
+        internal const string AvgSpeedInnerOld = "(s.reasoningOutputTokens??0)>0&&c.jsx(Bp,{label:\"推理输出（已计入）\",value:uo(s.reasoningOutputTokens??0)}),c.jsx(\"span\",{className:\"context-usage-note\",children:\"当前会话记录中服务商报告的累计用量。\"})";
+
+        internal const string AvgSpeedInnerNew = "(s.reasoningOutputTokens??0)>0&&c.jsx(Bp,{label:\"推理输出（已计入）\",value:uo(s.reasoningOutputTokens??0)}),c.jsx(Bp,{label:\"平均速度\",value:(()=>{let t0=0,n0=0;for(let i0=1;i0<(n?n.length:0);i0++){const m0=n[i0],p0=n[i0-1];if(m0&&m0.role===\"assistant\"&&m0.metrics&&m0.metrics.usage&&typeof m0.ts===\"number\"&&p0&&typeof p0.ts===\"number\"&&m0.ts>p0.ts){t0+=m0.metrics.usage.outputTokens||0;n0+=m0.ts-p0.ts}}return n0>0?Math.round(t0/n0*1000)+\" 令牌/秒\":\"—\"})()}),c.jsx(\"span\",{className:\"context-usage-note\",children:\"当前会话记录中服务商报告的累计用量。\"})";
+
+        internal const string AvgSpeedOuterPrev2 = "strokeDasharray:`${P} ${100-P}`})]})}),(()=>{let t0=0,n0=0;for(let i0=1;i0<(n?n.length:0);i0++){const m0=n[i0],p0=n[i0-1];if(m0&&m0.role===\"assistant\"&&m0.metrics&&m0.metrics.usage&&typeof m0.ts===\"number\"&&p0&&typeof p0.ts===\"number\"&&m0.ts>p0.ts){t0+=m0.metrics.usage.outputTokens||0;n0+=m0.ts-p0.ts}}return n0>0?c.jsx(\"span\",{className:\"context-usage-speed\",title:\"本会话平均输出速度：输出令牌 ÷ 总耗时\",style:{color:\"var(--muted)\",fontSize:\"var(--font-size-label)\",whiteSpace:\"nowrap\"},children:Math.round(t0/n0*1000)+\" t/s\"}):null})(),v&&c.jsxs(c.Fragment,{";
+
+        internal const string AvgSpeedOuterPrev = "strokeDasharray:`${P} ${100-P}`})]})}),(()=>{let t0=0,n0=0;for(let i0=1;i0<(n?n.length:0);i0++){const m0=n[i0],p0=n[i0-1];if(m0&&m0.role===\"assistant\"&&m0.metrics&&m0.metrics.usage&&typeof m0.ts===\"number\"&&p0&&typeof p0.ts===\"number\"&&m0.ts>p0.ts){t0+=m0.metrics.usage.outputTokens||0;n0+=m0.ts-p0.ts}}return n0>0?c.jsx(\"span\",{className:\"context-usage-speed\",style:{color:\"var(--muted)\",fontSize:\"var(--font-size-label)\",whiteSpace:\"nowrap\"},children:\"平均 \"+Math.round(t0/n0*1000)+\" 令牌/秒\"}):null})(),v&&c.jsxs(c.Fragment,{";
+
+        internal const string AvgSpeedOuterOld = "strokeDasharray:`${P} ${100-P}`})]})}),v&&c.jsxs(c.Fragment,{";
+
+        internal const string AvgSpeedOuterPrev3 = "strokeDasharray:`${P} ${100-P}`})]})}),(()=>{let t0=0,n0=0;const w0=Date.now();for(let i0=1;i0<(n?n.length:0);i0++){const m0=n[i0],p0=n[i0-1];if(m0&&m0.role===\"assistant\"&&m0.metrics&&m0.metrics.usage&&p0&&typeof p0.ts===\"number\"){const e0=typeof m0.ts===\"number\"?m0.ts:w0;if(e0>p0.ts){t0+=m0.metrics.usage.outputTokens||0;n0+=e0-p0.ts}}}return n0>0?c.jsx(\"span\",{className:\"context-usage-speed\",title:\"本会话平均输出速度：输出令牌 ÷ 总耗时\",style:{color:\"var(--muted)\",fontSize:\"var(--font-size-label)\",whiteSpace:\"nowrap\"},children:Math.round(t0/n0*1000)+\" t/s\"}):null})(),v&&c.jsxs(c.Fragment,{";
+
+        internal const string AvgSpeedOuterPrev4 = "strokeDasharray:`${P} ${100-P}`})]})}),(()=>{let t0=0,n0=0;const w0=Date.now(),hs=t=>{let c0=0,a1=0;for(let i2=0;i2<t.length;i2++){const u2=t.charCodeAt(i2);if((u2>=13312&&u2<=40959)||(u2>=12288&&u2<=12351)||(u2>=65280&&u2<=65519))c0++;else a1++}return c0*0.7+a1*0.24};for(let i0=1;i0<(n?n.length:0);i0++){const m0=n[i0],p0=n[i0-1];if(m0&&m0.role===\"assistant\"&&p0&&typeof p0.ts===\"number\"){if(typeof m0.ts===\"number\"){if(m0.metrics&&m0.metrics.usage&&m0.ts>p0.ts){t0+=m0.metrics.usage.outputTokens||0;n0+=m0.ts-p0.ts}}else{let e2=0;const ps=m0.parts||[];for(const q of ps){if((q.kind===\"text\"||q.kind===\"reasoning\")&&typeof q.text===\"string\")e2+=hs(q.text);else if(q.kind===\"tool\"&&q.input&&typeof q.input===\"object\"){try{e2+=hs(JSON.stringify(q.input))}catch{}}}const rt=m0.metrics&&m0.metrics.usage&&m0.metrics.usage.outputTokens||0;t0+=rt>e2?rt:e2;if(w0>p0.ts)n0+=w0-p0.ts}}}return n0>0?c.jsx(\"span\",{className:\"context-usage-speed\",title:\"本会话平均输出速度：输出令牌 ÷ 总耗时（进行中轮为实时值）\",style:{color:\"var(--muted)\",fontSize:\"var(--font-size-label)\",whiteSpace:\"nowrap\"},children:Math.round(t0/n0*1000)+\" t/s\"}):null})(),v&&c.jsxs(c.Fragment,{";
+
+        internal const string AvgSpeedOuterNew = "strokeDasharray:`${P} ${100-P}`})]})}),(()=>{let t0=0,n0=0;for(const m0 of (n||[])){if(m0&&m0.role===\"assistant\"&&m0.metrics&&m0.metrics.usage&&m0.metrics.fbDecodeMs>0){t0+=m0.metrics.usage.outputTokens||0;n0+=m0.metrics.fbDecodeMs}}if(!(n0>0))return null;const v0=t0*1000/n0;return c.jsx(\"span\",{className:\"context-usage-speed\",title:\"本会话生成速度：输出令牌 ÷ 纯生成耗时（不含工具执行与等待；参考 DeepSeek Harness 口径）\",style:{color:\"var(--muted)\",fontSize:\"var(--font-size-label)\",whiteSpace:\"nowrap\"},children:(v0>=10?Math.round(v0):Math.round(v0*10)/10)+\" t/s\"})})(),v&&c.jsxs(c.Fragment,{";
+
+        /// <summary>
+        /// 令牌用量：输入框一行（上下文圆环按钮旁）显示「N t/s」（悬停提示完整说明）——
+        /// Σ输出令牌 ÷ Σ纯生成耗时（DSH 口径：首个输出块 → 该响应最后一块；不含工具执行、
+        /// 预填与排队），由 orchestrator 的 emit 计时 + onMetrics 同步提供。历版自动撤除迁移。
+        /// 备份名带 -speed 后缀：避免与其它补丁同秒时互相覆盖备份。
+        /// </summary>
+        private static Outcome ApplyAvgTokenSpeed(string path)
+        {
+            Outcome outcome = new Outcome();
+            outcome.File = path;
+            try
+            {
+                string text = File.ReadAllText(path, new UTF8Encoding(false));
+                int applied = 0;
+                List<string> missing = new List<string>();
+
+                // ① 撤除弹窗内首版（已废弃方案）：对照命中才撤，找不到属正常（新装机）。
+                if (text.IndexOf(AvgSpeedInnerNew, StringComparison.Ordinal) >= 0)
+                {
+                    int innerHits = CountOccurrences(text, AvgSpeedInnerNew);
+                    if (innerHits != 1)
+                    {
+                        missing.Add("弹窗内首版（待撤）锚点命中 " + innerHits + " 次（预期 1 次）");
+                    }
+                    else
+                    {
+                        text = text.Replace(AvgSpeedInnerNew, AvgSpeedInnerOld);
+                        applied++;
+                    }
+                }
+
+                // ② 撤除圆环旁静态版（v2，已废弃）：还原为接缝，交给下一步重打。
+                if (text.IndexOf(AvgSpeedOuterPrev2, StringComparison.Ordinal) >= 0)
+                {
+                    int prev2Hits = CountOccurrences(text, AvgSpeedOuterPrev2);
+                    if (prev2Hits != 1)
+                    {
+                        missing.Add("圆环旁静态版（待撤）锚点命中 " + prev2Hits + " 次（预期 1 次）");
+                    }
+                    else
+                    {
+                        text = text.Replace(AvgSpeedOuterPrev2, AvgSpeedOuterOld);
+                        applied++;
+                    }
+                }
+
+                // ③ 撤除圆环旁长文字首版（已废弃）：还原为接缝，交给下一步重打。
+                if (text.IndexOf(AvgSpeedOuterPrev, StringComparison.Ordinal) >= 0)
+                {
+                    int prevHits = CountOccurrences(text, AvgSpeedOuterPrev);
+                    if (prevHits != 1)
+                    {
+                        missing.Add("圆环旁首版（待撤）锚点命中 " + prevHits + " 次（预期 1 次）");
+                    }
+                    else
+                    {
+                        text = text.Replace(AvgSpeedOuterPrev, AvgSpeedOuterOld);
+                        applied++;
+                    }
+                }
+
+                // ③b 撤除圆环旁实时估算版（v3）：还原为接缝，交给下一步重打。
+                if (text.IndexOf(AvgSpeedOuterPrev3, StringComparison.Ordinal) >= 0)
+                {
+                    int prev3Hits = CountOccurrences(text, AvgSpeedOuterPrev3);
+                    if (prev3Hits != 1)
+                    {
+                        missing.Add("圆环旁实时版（待撤）锚点命中 " + prev3Hits + " 次（预期 1 次）");
+                    }
+                    else
+                    {
+                        text = text.Replace(AvgSpeedOuterPrev3, AvgSpeedOuterOld);
+                        applied++;
+                    }
+                }
+
+                // ③c 撤除圆环旁 v4（字节估算实时版）：还原为接缝，交给下一步重打。
+                if (text.IndexOf(AvgSpeedOuterPrev4, StringComparison.Ordinal) >= 0)
+                {
+                    int prev4Hits = CountOccurrences(text, AvgSpeedOuterPrev4);
+                    if (prev4Hits != 1)
+                    {
+                        missing.Add("圆环旁估算版（待撤）锚点命中 " + prev4Hits + " 次（预期 1 次）");
+                    }
+                    else
+                    {
+                        text = text.Replace(AvgSpeedOuterPrev4, AvgSpeedOuterOld);
+                        applied++;
+                    }
+                }
+
+                // ④ 插入现行版：上下文圆环按钮旁显示「N t/s」（DSH 口径：Σ输出令牌 ÷ Σ纯生成耗时）。
+                if (text.IndexOf(AvgSpeedOuterNew, StringComparison.Ordinal) < 0)
+                {
+                    int outerHits = CountOccurrences(text, AvgSpeedOuterOld);
+                    if (outerHits != 1)
+                    {
+                        missing.Add("「平均速度」现行版锚点命中 " + outerHits + " 次（预期 1 次）");
+                    }
+                    else
+                    {
+                        text = text.Replace(AvgSpeedOuterOld, AvgSpeedOuterNew);
+                        applied++;
+                    }
+                }
+
+                // ⑤ 注入每秒重渲染：让「进行中」的秒数持续计入实时速度。
+                if (text.IndexOf("hanhuaSpdTick", StringComparison.Ordinal) < 0)
+                {
+                    string l1tAnchor = "function l1t({threadId:e}){";
+                    int l1tHits = CountOccurrences(text, l1tAnchor);
+                    if (l1tHits != 1)
+                    {
+                        missing.Add("重渲染注入锚点命中 " + l1tHits + " 次（预期 1 次）");
+                    }
+                    else
+                    {
+                        text = text.Replace(l1tAnchor, l1tAnchor + "const[,hanhuaSpdTick]=w.useState(0);w.useEffect(()=>{const hanhuaSpdTimer=setInterval(()=>hanhuaSpdTick(v=>v+1),1e3);return()=>clearInterval(hanhuaSpdTimer)},[]);");
+                        applied++;
+                    }
+                }
+
+                outcome.Missing = missing.ToArray();
+                if (missing.Count == 0 && applied > 0)
+                {
+                    outcome.Applied = applied;
+                    outcome.Backup = path + ".pre-localpatch-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-speed";
+                    File.Copy(path, outcome.Backup, true);
+                    if (!MainForm.WriteFileAtomic(path, text))
+                    {
+                        outcome.Error = "写入失败";
+                    }
+                }
+                else if (missing.Count == 0)
+                {
+                    outcome.Skipped = 1;
+                }
+            }
+            catch (Exception ex)
+            {
+                outcome.Error = ex.GetType().Name + ": " + ex.Message;
+            }
+            return outcome;
+        }
+
+        /// <summary>
+        /// 运行中用量接线：UI store 增加「turn_metrics」事件处理——把 orchestrator 在中途
+        ///（onMetrics：每步用量上报时）推送的累积用量写进「进行中」的消息，配合速度显示
+        /// 让数字在任务运行期间持续更新。只动 jEe 消息更新器一处；备份名带 -tm 后缀。
+        /// </summary>
+        private static Outcome ApplyTurnMetricsBridge(string path)
+        {
+            Outcome outcome = new Outcome();
+            outcome.File = path;
+            try
+            {
+                string text = File.ReadAllText(path, new UTF8Encoding(false));
+                if (text.IndexOf("turn_metrics", StringComparison.Ordinal) >= 0)
+                {
+                    outcome.Skipped = 1;
+                    return outcome;
+                }
+                string anchor = "if(r.streamSeq!==void 0&&n<=r.streamSeq)return e;if(t.type===\"finish\"){";
+                int hits = CountOccurrences(text, anchor);
+                if (hits != 1)
+                {
+                    outcome.Missing = new string[] { "「运行中用量」接线锚点命中 " + hits + " 次（预期 1 次）" };
+                    return outcome;
+                }
+                text = text.Replace(anchor, "if(r.streamSeq!==void 0&&n<=r.streamSeq)return e;if(t.type===\"turn_metrics\")return _S(e,i,{...r,metrics:t.metrics??r.metrics});if(t.type===\"finish\"){");
+                outcome.Applied = 1;
+                outcome.Backup = path + ".pre-localpatch-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-tm";
+                File.Copy(path, outcome.Backup, true);
+                if (!MainForm.WriteFileAtomic(path, text))
+                {
+                    outcome.Error = "写入失败";
+                }
+            }
+            catch (Exception ex)
+            {
+                outcome.Error = ex.GetType().Name + ": " + ex.Message;
+            }
+            return outcome;
+        }
+
         internal static List<Outcome> ApplyAll(string resourcesDir)
         {
             List<Outcome> outcomes = new List<Outcome>();
@@ -10026,6 +10404,8 @@ namespace FreebuffController
                 foreach (string bundle in bundles)
                 {
                     outcomes.Add(ApplyAdvancedModeDefault(bundle));
+                    outcomes.Add(ApplyAvgTokenSpeed(bundle));
+                    outcomes.Add(ApplyTurnMetricsBridge(bundle));
                 }
             }
             return outcomes;
