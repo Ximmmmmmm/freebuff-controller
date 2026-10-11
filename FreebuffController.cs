@@ -28,8 +28,8 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
-[assembly: System.Reflection.AssemblyVersion("1.9.15.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.15.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.16.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.16.0")]
 
 namespace FreebuffController
 {
@@ -194,6 +194,15 @@ namespace FreebuffController
             if (args != null && args.Length >= 1 && args[0] == "--self-test")
             {
                 Environment.Exit(MainForm.RunSelfTest((args.Length >= 2) ? args[1] : null));
+                return;
+            }
+            // --reapply：静默重打本机补丁（无 GUI），供汉化安装脚本（apply.sh）在更新汉化后调用。
+            // 放在单实例互斥之前——控制器 GUI 开着时也要能跑（与启动时的检查同一实现，
+            // 幂等 + 原子写盘，可安全并行）。退出码：0 = 成功/已最新，1 = 有锚点未命中或失败，
+            // 2 = 环境异常（资源目录不存在等）。
+            if (args != null && args.Length >= 1 && args[0] == "--reapply")
+            {
+                Environment.Exit(MainForm.RunReapply());
                 return;
             }
             ServicePointManager.DefaultConnectionLimit = 20;
@@ -5621,10 +5630,8 @@ namespace FreebuffController
                     RefreshHanhuaUi();
                     CleanupAfterUpdate();
                     CheckPackUpdateAsync();
-                    StartAutoRestoreHanhua("检测到 Freebuff 更新", delegate
-                    {
-                        EnsureLocalPatches("更新后");
-                    });
+                    // 补丁由 StartAutoRestoreHanhua 的完成回调统一补打，这里不再单独挂
+                    StartAutoRestoreHanhua("检测到 Freebuff 更新", null);
                 }
             });
         }
@@ -6349,7 +6356,7 @@ namespace FreebuffController
             }
             else if (StartAutoRestoreHanhua("启动前", delegate
             {
-                EnsureLocalPatches("启动前");
+                // 补丁由 StartAutoRestoreHanhua 的完成回调统一补打（且在本次回调之前）
                 LaunchIndexNow(rowIndex);
             }) != RestoreOutcome.Started)
             {
@@ -7818,10 +7825,8 @@ namespace FreebuffController
                             {
                                 SetStatus("汉化包 v" + ver + " 已就绪 · 自动应用待命。", ColGreen);
                             }
-                            StartAutoRestoreHanhua("汉化包已就绪", delegate
-                            {
-                                EnsureLocalPatches("更新后");
-                            });
+                            // 补丁由 StartAutoRestoreHanhua 的完成回调统一补打，这里不再单独挂
+                            StartAutoRestoreHanhua("汉化包已就绪", null);
                         }
                         else if (mis != null)
                         {
@@ -8697,6 +8702,50 @@ namespace FreebuffController
             return tcpListener;
         }
 
+        /// <summary>
+        /// --reapply：静默重打本机补丁（无 GUI、无弹窗）。把「检测该打哪些补丁 → 应用 →
+        /// 写状态文件」整条链跑一遍——与控制器启动时的检查同一实现（幂等 + 原子写盘），
+        /// 所以 GUI 开着时也可以安全并行调用。退出码：0 = 全部成功或已是最新；
+        /// 1 = 有锚点未命中 / 应用失败；2 = 环境异常（资源目录不存在等）。
+        /// 用途：汉化安装脚本（apply.sh）更新完汉化后调用——换掉 ui/ 会把本机补丁冲掉，
+        /// 这命令让它一条命令补回来，不必等控制器下次打开。
+        /// </summary>
+        internal static int RunReapply()
+        {
+            return RunReapplyCore(FreebuffResources, true);
+        }
+
+        // 与 RunReapply 拆开是为了让自测能对 fixture 目录直接打靶
+        //（writeStatus=false 不污染真实的 local-patches.status.txt）。
+        internal static int RunReapplyCore(string resourcesDir, bool writeStatus)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(resourcesDir) || !Directory.Exists(resourcesDir))
+                {
+                    return 2;
+                }
+                List<LocalPatches.Outcome> outcomes = LocalPatches.ApplyAll(resourcesDir);
+                if (writeStatus)
+                {
+                    LocalPatches.WriteStatusFile(outcomes);
+                }
+                foreach (LocalPatches.Outcome outcome in outcomes)
+                {
+                    if (outcome.Error != null || outcome.Missing.Length > 0)
+                    {
+                        return 1;
+                    }
+                }
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                LogFail("--reapply 失败", ex);
+                return 2;
+            }
+        }
+
         internal static int RunSelfTest(string reportPath)
         {
             if (string.IsNullOrEmpty(reportPath))
@@ -9022,6 +9071,28 @@ namespace FreebuffController
                 LocalPatches.ApplyAll(lpBadRoot);
                 action("LocalPatches：锚点缺失时一个字节都不写", File.ReadAllText(lpBadUi) == "nothing here\n" && File.ReadAllText(lpBadOrc) == "function unrelated() {}\n", "");
                 action("LocalPatches：锚点缺失时不留备份文件", Directory.GetFiles(lpBadRoot, "*.pre-localpatch-*", SearchOption.AllDirectories).Length == 0, "");
+                // --reapply（静默重打入口）：核心逻辑 RunReapplyCore 对 fixture 直接打靶
+                string lpReapplyRoot = Path.Combine(text, "lp-reapply");
+                string lpReapplyUiDir = Path.Combine(lpReapplyRoot, "orchestrator", "ui", "assets");
+                string lpReapplyUi = Path.Combine(lpReapplyUiDir, "index-lp.js");
+                Directory.CreateDirectory(lpReapplyUiDir);
+                File.WriteAllText(Path.Combine(lpReapplyRoot, "orchestrator", "orchestrator.js"), LocalPatches.OrchestratorEditsFixture(), new UTF8Encoding(false));
+                File.WriteAllText(lpReapplyUi, "vme=\"freebuff-advanced-mode\";function wut(){try{return localStorage.getItem(vme)===\"true\"}catch{return!1}}\n" + LocalPatches.AvgSpeedOuterOld + "\n" + "function l1t({threadId:e}){var x=1}\n" + "if(r.streamSeq!==void 0&&n<=r.streamSeq)return e;if(t.type===\"finish\"){const a=Z4(r.parts,t,Rh);\n", new UTF8Encoding(false));
+                int lpReapplyRc = RunReapplyCore(lpReapplyRoot, false);
+                string lpReapplyText = File.ReadAllText(lpReapplyUi);
+                bool lpReapplyUiApplied = lpReapplyText.IndexOf(LocalPatches.AvgSpeedOuterNew, StringComparison.Ordinal) >= 0 && lpReapplyText.IndexOf("hanhuaSpdTick", StringComparison.Ordinal) >= 0 && lpReapplyText.IndexOf("t.type===\"turn_metrics\"", StringComparison.Ordinal) >= 0;
+                string lpReapplyDetail = "rc=" + lpReapplyRc + " uiApplied=" + lpReapplyUiApplied;
+                if (lpReapplyRc != 0)
+                {
+                    // 调试/诊断：非 0 时把每个文件的明细带进报告（第二次跑是幂等的，不影响断言）
+                    foreach (LocalPatches.Outcome lpDbg in LocalPatches.ApplyAll(lpReapplyRoot))
+                    {
+                        lpReapplyDetail += " | " + Path.GetFileName(lpDbg.File) + ": applied=" + lpDbg.Applied + " missing=" + string.Join(",", lpDbg.Missing) + ((lpDbg.Error != null) ? (" err=" + lpDbg.Error) : "");
+                    }
+                }
+                action("--reapply：良好 fixture 返回 0 且补丁就位", lpReapplyRc == 0 && lpReapplyUiApplied, lpReapplyDetail);
+                action("--reapply：缺锚点 fixture 返回 1", RunReapplyCore(lpBadRoot, false) == 1, "");
+                action("--reapply：资源目录不存在返回 2", RunReapplyCore(Path.Combine(text, "lp-nonexistent"), false) == 2, "");
             }
 
             catch (Exception ex2)
@@ -9517,6 +9588,12 @@ namespace FreebuffController
                         SetStatus(text2, (error == null) ? ColGreen : ColNewVersion);
                         ShowStatusAfterIdle((error == null) ? pruneNote : null);
                         RefreshHanhuaUi();
+                        // 2026-10-11：应用汉化会换掉整个 ui/（本机补丁随之被冲掉）——在这里**统一**
+                        // 补打一次，调用点不必各自记得挂。此前「检测到新构建 / 延后重试」两条路径的
+                        // onDone 是 null，补丁要等下次打开控制器才回来（0.0.169.1 更新实测踩过）。
+                        // 放在 onDone 之前：「启动前」的 onDone 会紧接着 LaunchIndexNow，补丁必须先就位。
+                        // 应用失败（error != null）也要补——可能落在「拷贝了一半」的中间态上。
+                        EnsureLocalPatches("汉化应用完成（" + why + "）");
                         if (onDone != null)
                         {
                             onDone();
