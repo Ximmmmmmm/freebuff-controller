@@ -28,8 +28,8 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
-[assembly: System.Reflection.AssemblyVersion("1.9.16.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.16.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.17.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.17.0")]
 
 namespace FreebuffController
 {
@@ -2535,6 +2535,12 @@ namespace FreebuffController
 
         private bool statusClickable;
 
+        // 行动提示（发现新版 / 下载失败重试）转常驻：不随 8 秒消退；被「额度已耗尽」这类
+        // 瞬时消息顶掉后，等它消退再自动浮回来——发现新版后永远不会「找不到更新入口」。
+        private bool statusSticky;
+
+        private string statusActionText;
+
         private Label selfLink;
 
         private Label hintLabel;
@@ -3246,6 +3252,7 @@ namespace FreebuffController
             }
             StopStatusBreathing();
             statusClickable = false;
+            statusSticky = false;
             statusLabel.Cursor = Cursors.Default;
             bool wasIdle = statusLabel.Text == ReadyStatus();
             Color color = tint ?? ColText;
@@ -3279,14 +3286,32 @@ namespace FreebuffController
                 {
                     statusRevertTimer.Stop();
                     StopStatusBreathing();
+                    if (statusSticky)
+                    {
+                        return;
+                    }
                     if (!base.IsDisposed && statusLabel != null)
                     {
                         FadeStatusColor(ColBg, 260, delegate
                         {
                             if (statusLabel != null)
                             {
-                                statusLabel.Text = ReadyStatus();
-                                statusLabel.ForeColor = ColText;
+                                statusClickable = false;
+                                statusLabel.Cursor = Cursors.Default;
+                                if (statusActionText != null)
+                                {
+                                    // 还有没处理的行动项（发现新版 / 下载失败重试）——淡出后浮回来。
+                                    statusLabel.Text = statusActionText;
+                                    statusLabel.ForeColor = ColNewVersion;
+                                    statusClickable = true;
+                                    statusLabel.Cursor = Cursors.Hand;
+                                    statusSticky = true;
+                                }
+                                else
+                                {
+                                    statusLabel.Text = ReadyStatus();
+                                    statusLabel.ForeColor = ColText;
+                                }
                             }
                         });
                     }
@@ -3296,7 +3321,8 @@ namespace FreebuffController
             statusRevertTimer.Start();
         }
 
-        // 状态行可点击的行动项（发现新版 / 下载失败）：点击走 OnVersionLinkClick。
+        // 状态行可点击的行动项（发现新版 / 下载失败重试）：点击走 OnVersionLinkClick。
+        // 行动项常驻：停掉自动消退计时；被瞬时消息顶掉后由消退回调自动浮回（见上方 Tick）。
         private void SetStatusAction(string text, Color? tint = null)
         {
             SetStatus(text, tint);
@@ -3304,11 +3330,19 @@ namespace FreebuffController
             {
                 return;
             }
+            statusActionText = text;
+            statusSticky = true;
+            if (statusRevertTimer != null)
+            {
+                statusRevertTimer.Stop();
+            }
             statusClickable = true;
             statusLabel.Cursor = Cursors.Hand;
             if (tint != null && tint.Value.ToArgb() == ColNewVersion.ToArgb())
             {
                 Delay(220, StartStatusBreathing);
+                // 呼吸只负责「抓住注意」的十几秒；之后保持常驻的琥珀色，不再无限脉动。
+                Delay(13200, StopStatusBreathing);
             }
         }
 
@@ -5770,11 +5804,17 @@ namespace FreebuffController
                             if (version != null && version2 != null && version.CompareTo(version2) >= 0)
                             {
                                 bool flag = updateStarted;
+                                bool wasNoticeUp = statusActionText != null;
                                 updateStarted = false;
                                 updateFailed = false;
+                                statusActionText = null;   // 已是最新：撤下常驻的更新入口
                                 if (flag)
                                 {
                                     CleanupAfterUpdate();
+                                }
+                                if (flag || wasNoticeUp)
+                                {
+                                    SetStatus("Freebuff v" + installedVersion + " · 已是最新 ✓", ColGreen);
                                 }
                             }
                             ApplyVersionUi(false);
@@ -5818,7 +5858,7 @@ namespace FreebuffController
             }
             else if (updateFailed)
             {
-                SetStatusAction("下载失败 · 点击打开下载页", ColNewVersion);
+                SetStatusAction("下载更新失败 · 点此重试", ColNewVersion);
             }
         }
 
@@ -5845,15 +5885,9 @@ namespace FreebuffController
             }
             else if (updateFailed)
             {
+                // 失败后点提示 = 直接重试下载（原先跳 GitHub 下载页；国内直连常打不开，重试更实用）。
                 updateFailed = false;
-                try
-                {
-                    Process.Start("https://github.com/CodebuffAI/codebuff-community/releases/latest");
-                }
-                catch
-                {
-                }
-                ApplyVersionUi(false);
+                StartUpdateDownload();
             }
             else if (UpdateAvailable())
             {
@@ -5871,6 +5905,8 @@ namespace FreebuffController
             {
                 return;
             }
+            // 更新入口已被点击：撤下常驻提示，后续由进度 / 失败（可点重试） / 完成消息接管。
+            statusActionText = null;
             SetStatus("正在下载 Freebuff v" + latestVersion + " 安装包…");
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -5981,8 +6017,8 @@ namespace FreebuffController
                         if (!base.IsDisposed)
                         {
                             updateFailed = true;
-                            ApplyVersionUi(false);
-                            SetStatus("下载更新失败：" + error.Message, ColNewVersion);
+                            // 常驻的失败提示：点它就是重试（GitHub 直连在国内常打不开，跳下载页不如原地重试）。
+                            SetStatusAction("下载更新失败：" + error.Message + " · 点此重试", ColNewVersion);
                         }
                     });
                 }
