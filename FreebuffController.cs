@@ -28,8 +28,8 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
-[assembly: System.Reflection.AssemblyVersion("1.9.17.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.17.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.18.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.18.0")]
 
 namespace FreebuffController
 {
@@ -9088,6 +9088,36 @@ namespace FreebuffController
                 LocalPatches.ApplyAll(lpRoot6);
                 string lp6Text = File.ReadAllText(lpUi6);
                 action("LocalPatches：v4 估算版被撤、v5（DSH 口径）就位（迁移）", lp6Text.IndexOf(LocalPatches.AvgSpeedOuterPrev4, StringComparison.Ordinal) < 0 && lp6Text.IndexOf(LocalPatches.AvgSpeedOuterNew, StringComparison.Ordinal) >= 0 && lp6Text.IndexOf("hanhuaSpdTick", StringComparison.Ordinal) >= 0, lpUi6);
+                // 0.0.171 锚点漂移回归：上游把 l1t 签名改成 (e,t,n=!0)（装机 bundle 实测形态）。
+                // 新形态 fixture：速度显示 + 重渲染注入都要就位。
+                string lpRoot7 = Path.Combine(text, "lp-res7");
+                string lpUiDir7 = Path.Combine(lpRoot7, "orchestrator", "ui", "assets");
+                string lpUi7 = Path.Combine(lpUiDir7, "index-lp7.js");
+                Directory.CreateDirectory(lpUiDir7);
+                File.WriteAllText(lpUi7, "vme=\"freebuff-advanced-mode\";function wut(){try{return localStorage.getItem(vme)===\"true\"}catch{return!1}}\n" + LocalPatches.AvgSpeedOuterOld + "\n" + "function l1t(e,t,n=!0){var x=1}\n", new UTF8Encoding(false));
+                LocalPatches.ApplyAll(lpRoot7);
+                string lp7Text = File.ReadAllText(lpUi7);
+                action("LocalPatches：l1t 新签名（0.0.171 实测形态）下速度显示 + 重渲染注入都就位", lp7Text.IndexOf(LocalPatches.AvgSpeedOuterNew, StringComparison.Ordinal) >= 0 && lp7Text.IndexOf("hanhuaSpdTick", StringComparison.Ordinal) >= 0, lpUi7);
+                // 0.0.171 事故回归：两种形态都不认（上游又改签名）时，速度显示必须照常落盘——
+                // 不允许再被重渲染注入的 missing 连带枪毙（fail-closed 误伤）。
+                string lpRoot8 = Path.Combine(text, "lp-res8");
+                string lpUiDir8 = Path.Combine(lpRoot8, "orchestrator", "ui", "assets");
+                string lpUi8 = Path.Combine(lpUiDir8, "index-lp8.js");
+                Directory.CreateDirectory(lpUiDir8);
+                File.WriteAllText(lpUi8, "vme=\"freebuff-advanced-mode\";function wut(){try{return localStorage.getItem(vme)===\"true\"}catch{return!1}}\n" + LocalPatches.AvgSpeedOuterOld + "\n" + "function l1t(e,t){var x=1}\n", new UTF8Encoding(false));
+                List<LocalPatches.Outcome> lp8Outcomes = LocalPatches.ApplyAll(lpRoot8);
+                string lp8Text = File.ReadAllText(lpUi8);
+                bool lp8SpeedIn = lp8Text.IndexOf(LocalPatches.AvgSpeedOuterNew, StringComparison.Ordinal) >= 0;
+                bool lp8TickMissing = false;
+                foreach (LocalPatches.Outcome lp8 in lp8Outcomes)
+                {
+                    if (lp8.File == lpUi8 && lp8.Missing.Length > 0)
+                    {
+                        lp8TickMissing = true;
+                    }
+                }
+                action("LocalPatches：重渲染注入锚点漂移不连坐——速度显示照常落盘", lp8SpeedIn && !lp8Text.Contains("hanhuaSpdTick"), lpUi8);
+                action("LocalPatches：重渲染注入单独报 missing（漂移可见、不静默）", lp8TickMissing, lpUi8);
                 List<LocalPatches.Outcome> lpSecond = LocalPatches.ApplyAll(lpRoot);
                 bool lpIdempotent = true;
                 foreach (LocalPatches.Outcome lp in lpSecond)
@@ -9233,27 +9263,36 @@ namespace FreebuffController
 
 
         /// <summary>
-        /// 应用本机补丁（不进汉化包、不做界面提示）：控制器启动、启动实例前、汉化恢复
-        /// 完成之后各调一次。正常结果只写 local-patches.status.txt；锚点未命中或异常
-        /// 才写失败日志。
+        /// 应用本机补丁：控制器启动、启动实例前、汉化恢复完成之后各调一次。正常结果只写
+        /// local-patches.status.txt；锚点未命中或异常写失败日志，并在状态行给一条琥珀色
+        /// 提示（0.0.171 实锤：速度显示被锚点漂移连带枪毙时，唯一线索只是没人会去翻的
+        /// status 文件——现在漂移当场可见）。状态行被常驻通知（如新版本提示）占着时让位，
+        /// 不覆盖它。
         /// </summary>
         private void EnsureLocalPatches(string why)
         {
             try
             {
                 List<LocalPatches.Outcome> outcomes = LocalPatches.ApplyAll(FreebuffResources);
+                List<string> missed = new List<string>();
                 foreach (LocalPatches.Outcome outcome in outcomes)
                 {
                     if (outcome.Error != null)
                     {
                         LogFail("[本机补丁] " + why + " 失败：" + outcome.File + " ← " + outcome.Error);
+                        missed.Add(Path.GetFileName(outcome.File) + " 写入失败");
                     }
                     else if (outcome.Missing.Length > 0)
                     {
                         LogFail("[本机补丁] " + why + " 锚点未命中（上游可能改版，需人工重判）：" + outcome.File + " ← " + string.Join("、", outcome.Missing));
+                        missed.Add(Path.GetFileName(outcome.File) + "：" + string.Join("、", outcome.Missing));
                     }
                 }
                 LocalPatches.WriteStatusFile(outcomes);
+                if (missed.Count > 0 && !statusSticky && statusLabel != null)
+                {
+                    SetStatus("本机补丁有 " + missed.Count + " 处未命中（上游可能改版）：" + string.Join("；", missed.ToArray()) + " — 详见 local-patches.status.txt", ColNewVersion);
+                }
             }
             catch (Exception ex)
             {
@@ -10286,11 +10325,27 @@ namespace FreebuffController
 
         internal const string AvgSpeedOuterNew = "strokeDasharray:`${P} ${100-P}`})]})}),(()=>{let t0=0,n0=0;for(const m0 of (n||[])){if(m0&&m0.role===\"assistant\"&&m0.metrics&&m0.metrics.usage&&m0.metrics.fbDecodeMs>0){t0+=m0.metrics.usage.outputTokens||0;n0+=m0.metrics.fbDecodeMs}}if(!(n0>0))return null;const v0=t0*1000/n0;return c.jsx(\"span\",{className:\"context-usage-speed\",title:\"本会话生成速度：输出令牌 ÷ 纯生成耗时（不含工具执行与等待；参考 DeepSeek Harness 口径）\",style:{color:\"var(--muted)\",fontSize:\"var(--font-size-label)\",whiteSpace:\"nowrap\"},children:(v0>=10?Math.round(v0):Math.round(v0*10)/10)+\" t/s\"})})(),v&&c.jsxs(c.Fragment,{";
 
+        // 「每秒重渲染注入」的锚点候选（多形态兼容）：上游 0.0.171 把消息组件函数签名从
+        // `function l1t({threadId:e}){` 改成了 `function l1t(e,t,n=!0){`（装机 bundle 实测），
+        // 只认旧形态会让注入永远 0 命中。新旧都收，各自必须唯一命中；多个形态同时命中
+        // 视为歧义，fail-closed。上游再改签名时往这里加一种形态即可。
+        internal static readonly string[] SpeedTickAnchors = new string[]
+        {
+            "function l1t({threadId:e}){",
+            "function l1t(e,t,n=!0){"
+        };
+
+        // 注入代码本体（插在锚点函数体首）：组件内 1s 滴答计数器，让「进行中」的秒数
+        // 持续计入实时速度（不滴答则只有静态值）。
+        internal const string SpeedTickInject = "const[,hanhuaSpdTick]=w.useState(0);w.useEffect(()=>{const hanhuaSpdTimer=setInterval(()=>hanhuaSpdTick(v=>v+1),1e3);return()=>clearInterval(hanhuaSpdTimer)},[]);";
+
         /// <summary>
         /// 令牌用量：输入框一行（上下文圆环按钮旁）显示「N t/s」（悬停提示完整说明）——
         /// Σ输出令牌 ÷ Σ纯生成耗时（DSH 口径：首个输出块 → 该响应最后一块；不含工具执行、
         /// 预填与排队），由 orchestrator 的 emit 计时 + onMetrics 同步提供。历版自动撤除迁移。
         /// 备份名带 -speed 后缀：避免与其它补丁同秒时互相覆盖备份。
+        /// 「每秒重渲染注入」不在这里——已拆成独立的 ApplySpeedTick：0.0.171 实锤它锚点
+        /// 漂移（l1t 签名改动）时，曾因 fail-closed 把本补丁整个连带枪毙，速度显示全灭。
         /// </summary>
         private static Outcome ApplyAvgTokenSpeed(string path)
         {
@@ -10392,22 +10447,6 @@ namespace FreebuffController
                     }
                 }
 
-                // ⑤ 注入每秒重渲染：让「进行中」的秒数持续计入实时速度。
-                if (text.IndexOf("hanhuaSpdTick", StringComparison.Ordinal) < 0)
-                {
-                    string l1tAnchor = "function l1t({threadId:e}){";
-                    int l1tHits = CountOccurrences(text, l1tAnchor);
-                    if (l1tHits != 1)
-                    {
-                        missing.Add("重渲染注入锚点命中 " + l1tHits + " 次（预期 1 次）");
-                    }
-                    else
-                    {
-                        text = text.Replace(l1tAnchor, l1tAnchor + "const[,hanhuaSpdTick]=w.useState(0);w.useEffect(()=>{const hanhuaSpdTimer=setInterval(()=>hanhuaSpdTick(v=>v+1),1e3);return()=>clearInterval(hanhuaSpdTimer)},[]);");
-                        applied++;
-                    }
-                }
-
                 outcome.Missing = missing.ToArray();
                 if (missing.Count == 0 && applied > 0)
                 {
@@ -10422,6 +10461,66 @@ namespace FreebuffController
                 else if (missing.Count == 0)
                 {
                     outcome.Skipped = 1;
+                }
+            }
+            catch (Exception ex)
+            {
+                outcome.Error = ex.GetType().Name + ": " + ex.Message;
+            }
+            return outcome;
+        }
+
+        /// <summary>
+        /// 每秒重渲染注入：让「进行中」的秒数持续计入实时速度（速度显示的直播刷新）。
+        /// 与「N t/s」显示（ApplyAvgTokenSpeed）拆成两个独立补丁——上游改版只会打死
+        /// 这一个，显示照常工作（0.0.171 实锤：l1t 签名改动曾把整个速度补丁连带枪毙）。
+        /// 锚点走 SpeedTickAnchors 多形态兼容，各自必须唯一命中；歧义 = fail-closed。
+        /// 备份名带 -tick 后缀：避免与其它补丁同秒时互相覆盖备份。
+        /// </summary>
+        private static Outcome ApplySpeedTick(string path)
+        {
+            Outcome outcome = new Outcome();
+            outcome.File = path;
+            try
+            {
+                string text = File.ReadAllText(path, new UTF8Encoding(false));
+                if (text.IndexOf("hanhuaSpdTick", StringComparison.Ordinal) >= 0)
+                {
+                    outcome.Skipped = 1;
+                    return outcome;
+                }
+                string anchor = null;
+                List<string> seen = new List<string>();
+                foreach (string candidate in SpeedTickAnchors)
+                {
+                    int hits = CountOccurrences(text, candidate);
+                    if (hits == 1)
+                    {
+                        if (anchor != null)
+                        {
+                            anchor = null;
+                            seen.Add("多形态同时命中（歧义）");
+                            break;
+                        }
+                        anchor = candidate;
+                    }
+                    else if (hits > 1)
+                    {
+                        seen.Add(candidate + " ×" + hits);
+                    }
+                }
+                if (anchor == null)
+                {
+                    string detail = (seen.Count > 0) ? string.Join("；", seen.ToArray()) : SpeedTickAnchors.Length + " 种形态均 0 命中";
+                    outcome.Missing = new string[] { "重渲染注入锚点未唯一命中（" + detail + "）" };
+                    return outcome;
+                }
+                outcome.Applied = 1;
+                outcome.Backup = path + ".pre-localpatch-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-tick";
+                File.Copy(path, outcome.Backup, true);
+                if (!MainForm.WriteFileAtomic(path, text.Replace(anchor, anchor + SpeedTickInject)))
+                {
+                    outcome.Error = "写入失败";
                 }
             }
             catch (Exception ex)
@@ -10518,6 +10617,7 @@ namespace FreebuffController
                 {
                     outcomes.Add(ApplyAdvancedModeDefault(bundle));
                     outcomes.Add(ApplyAvgTokenSpeed(bundle));
+                    outcomes.Add(ApplySpeedTick(bundle));
                     outcomes.Add(ApplyTurnMetricsBridge(bundle));
                 }
             }
