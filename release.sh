@@ -19,7 +19,7 @@ python3 tools/embed-handover.py 2>/dev/null || python tools/embed-handover.py ||
 CSC="${SYSTEMROOT:-C:\Windows}/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
 "$CSC" -nologo -target:winexe -platform:anycpu -optimize+ -codepage:65001 \
   -r:System.dll -r:System.Core.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll -r:System.Management.dll \
-  -r:System.IO.Compression.dll -r:System.IO.Compression.FileSystem.dll \
+  -r:System.IO.Compression.dll -r:System.IO.Compression.FileSystem.dll -r:System.Security.dll \
   -win32icon:"app.ico" -out:"FreebuffController.exe" "FreebuffController.cs" \
   || { echo "BUILD FAILED（csc 编译出错，详见上方）" >&2; exit 1; }
 echo "built FreebuffController.exe"

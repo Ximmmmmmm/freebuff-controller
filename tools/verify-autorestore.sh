@@ -30,7 +30,9 @@ UI="${R}/orchestrator/ui"
 CTRL="${HERE}/FreebuffController.exe"
 
 fail() { echo "ERROR: $*" >&2; sleep 0.3 2>/dev/null || true; exit 1; }  # 等一下 tee，别把日志截尾
-sha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+# Windows 的 Git Bash 下 sha256sum 输出可能带反斜杠前缀（如 \8dc1048…），导致同一个哈希
+# 被误判成「不一致」。统一去掉首尾空白与反斜杠再比。
+sha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1 | tr -d '\\\r\n '; }
 
 # --- 0. 前置：应用必须全部退出（这同时也是自动恢复的第一条闸门）----------------
 if tasklist //FI "IMAGENAME eq Freebuff.exe" 2>/dev/null | grep -q 'Freebuff\.exe'; then
