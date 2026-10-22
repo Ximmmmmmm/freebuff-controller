@@ -7,6 +7,16 @@ A small Windows utility that lets the Freebuff desktop app run multiple instance
 > 纯第三方工具，不修改 Freebuff 本体，与 Freebuff 官方无关。
 > A third-party tool. It does not modify the Freebuff app itself.
 
+> **维护状态：已停止更新（2026-10-22）**
+>
+> 不再发布新版本，也不再跟进 Freebuff 的后续改版（登录态、额度接口、UI 锚点等）。
+> 现有 Release、源码与文档保持可用；Issue / PR 不再保证回复。
+> 代码以 MIT 许可发布，欢迎 fork 后继续维护或另起发行版——无需事先征得同意，
+> 保留原版权与许可声明即可。接手要点见文末「维护状态与接手」。
+>
+> **Maintenance status: discontinued (2026-10-22).** No further releases or compatibility fixes.
+> Existing releases and source remain available; forks are welcome under the MIT license.
+
 ## 功能 / Features
 
 - **多开**：主实例 + 实例 1~9，互不干扰。重复双击快捷方式不会吃一句「已经被占用」，而是把已在跑的窗口**直接叫到前台**
@@ -115,6 +125,18 @@ FreebuffController.exe --self-test %TEMP%\selftest.txt && type %TEMP%\selftest.t
 
 见 [CHANGELOG.md](CHANGELOG.md)：每版一条「改了什么 + 对用的你有什么影响」，
 发版时那一节就是 [Releases](https://github.com/Ximmmmmmm/freebuff-controller/releases) 页上的说明。
+
+## 维护状态与接手 / Maintenance & Handover
+
+- **停止维护**：2026-10-22 起不再更新。最后一个可用版本以 [Releases](https://github.com/Ximmmmmmm/freebuff-controller/releases) 页为准。
+- **还能用吗**：已发布的 exe 仍可运行；但它依赖 Freebuff 的内部行为，上游改版后可能失效——尤其是登录态与额度接口，控制器只能报告失败，不能自行适配。请以实际运行为准。
+- **为什么**：个人维护项目，不再投入时间跟进上游改版。不是删库，历史版本、源码与文档都保留。
+- **怎么接手**：
+  1. fork 本仓库，改 `FreebuffController.cs` 里的 `AssemblyVersion`，跑 `build.bat` 编译——只需要 Windows 自带的 .NET Framework 编译器。
+  2. 把 `release.sh` 里的仓库地址、Release 上传目标改成你自己的；README 里的 Releases 链接同理。
+  3. 上游改版导致本机补丁锚点漂移时，按 `local-patches.status.txt` 的提示重锚；改完先跑 `FreebuffController.exe --self-test`，全绿再发。
+  4. 想接手主仓库 / Release 名义的，可以开 issue 说明；不保证及时回复，但不会阻拦。
+- **许可**：MIT。fork、改名、继续发行都可以，保留原版权与许可声明即可；不提供任何担保。
 
 ## License
 
